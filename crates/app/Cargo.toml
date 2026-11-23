@@ -1,0 +1,16 @@
+[package]
+name = "photo-editor"
+description = "Offline photo editor for iPhone ProRAW DNGs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "photo-editor"
+path = "src/main.rs"
+
+[dependencies]
+pipeline = { path = "../pipeline" }
+eframe = "0.37.0"
+rfd = "0.18.0"

@@ -1,0 +1,25 @@
+[package]
+name = "pipeline"
+description = "Decode, adjust and export pipeline for the photo editor. No UI code lives here."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pipeline"
+
+[[bin]]
+name = "pe"
+path = "src/bin/pe.rs"
+
+[dependencies]
+rawler = "0.8.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
