@@ -52,6 +52,10 @@ pub struct SourceInfo {
     pub gain_map_applied: bool,
     /// Helper maps for the local sliders, worked out once from the decoded photo.
     pub local: Arc<LocalMaps>,
+    /// Measured colour fringing of the lens (extra red and blue magnification to undo it).
+    pub chromatic: [f32; 2],
+    /// Whether the file carries its own lens-correction instructions (DNG opcodes).
+    pub has_lens_opcodes: bool,
     pub tags: TagReport,
     /// Plain-language limitations for this particular file, shown in the app.
     pub notes: Vec<String>,
@@ -60,7 +64,12 @@ pub struct SourceInfo {
 impl SourceInfo {
     /// Everything the renderer needs from the file.
     pub fn look(&self) -> Look {
-        Look { baseline_exposure: self.baseline_exposure, tone_curve: self.tone_curve.clone(), local: Some(self.local.clone()) }
+        Look {
+            baseline_exposure: self.baseline_exposure,
+            tone_curve: self.tone_curve.clone(),
+            local: Some(self.local.clone()),
+            chromatic: self.chromatic,
+        }
     }
 }
 
@@ -222,6 +231,9 @@ fn decode_source(src: &RawSource) -> Result<DecodedImage> {
     }
     let image = image.oriented(orientation);
     let local = Arc::new(LocalMaps::compute(&image));
+    // Measured on a preview-sized copy: quick, and the answer is a ratio that holds at any size.
+    let chromatic = crate::lens::chromatic_scales(&image.downscale_to_fit(crate::PREVIEW_LONG_EDGE));
+    let has_lens_opcodes = tags.has(51009) || tags.has(51022);
 
     notes.extend(tags.limitations());
     let info = SourceInfo {
@@ -235,6 +247,8 @@ fn decode_source(src: &RawSource) -> Result<DecodedImage> {
         tone_curve,
         gain_map_applied,
         local,
+        chromatic,
+        has_lens_opcodes,
         tags,
         notes,
     };

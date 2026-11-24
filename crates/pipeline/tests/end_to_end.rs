@@ -10,7 +10,7 @@ use image::{DynamicImage, ImageDecoder};
 use pipeline::color::{srgb_decode, srgb_encode};
 use pipeline::decode::{decode_bytes, SourceKind};
 use pipeline::fixtures::{make_dng, test_scene, FixtureKind, FixtureSpec};
-use pipeline::{decode_file, export_jpeg, icc, render_srgb8, sidecar, Adjustments, ExportOptions, LinearImage, PipelineError};
+use pipeline::{decode_file, export_jpeg, icc, render_preview, sidecar, Adjustments, ExportOptions, LinearImage, PipelineError};
 
 fn write_fixture(dir: &Path, name: &str, spec: &FixtureSpec) -> PathBuf {
     let p = dir.join(name);
@@ -198,7 +198,7 @@ fn preview_agrees_with_export_scaled_to_preview_size() {
         everything_at_once(),
     ] {
         let preview_src = d.image.downscale_to_fit(400);
-        let preview = render_srgb8(&preview_src, &adj, &d.info.look());
+        let preview = render_preview(&preview_src, &adj, &d.info.look(), None, (d.image.width, d.image.height));
         let out = export_jpeg(&src, &d, &adj, &ExportOptions::next_to(&src)).unwrap();
         let (jpg, _) = read_jpeg(&out);
         let scaled = downscale_srgb(&jpg, preview.width, preview.height);

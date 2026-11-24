@@ -13,7 +13,7 @@ use eframe::egui::{
 use pipeline::{preset, sidecar, Adjustments, Crop, DecodedImage, ExportOptions, LinearImage, Lut3D, Preset, RenderedImage};
 
 use crate::canvas::CropDrag;
-use crate::engine::{Engine, Loaded, Msg, RenderRequest};
+use crate::engine::{Engine, Loaded, Msg, Region, RenderRequest};
 use crate::theme;
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -80,6 +80,26 @@ pub(crate) struct CropUi {
     pub straighten_from: Option<(Crop, bool)>,
 }
 
+/// How far the photo is zoomed in, and which part is in the middle of the screen.
+pub(crate) struct Zoom {
+    /// Screen pixels per photo pixel; `None` fits the whole picture in the window.
+    pub scale: Option<f32>,
+    /// The point of the finished picture at the centre of the screen (0…1).
+    pub centre: (f32, f32),
+}
+
+impl Zoom {
+    pub const FIT: Zoom = Zoom { scale: None, centre: (0.5, 0.5) };
+}
+
+/// What a preview request was for.
+#[derive(Clone, PartialEq)]
+pub(crate) struct RenderKey {
+    adjustments: Adjustments,
+    level: usize,
+    region: Option<Region>,
+}
+
 /// One open photo.
 pub(crate) struct Doc {
     pub path: PathBuf,
@@ -101,9 +121,13 @@ pub(crate) struct Doc {
     pub shown_revision: u64,
     pub render_ms: Option<f64>,
     pub shown_size: (usize, usize),
-    /// What the last preview request was for (the edit and the preview size),
-    /// so a change that can't alter the picture doesn't trigger another render.
-    pub rendered: Option<(Adjustments, usize)>,
+    /// What the last preview request was for, so a change that can't alter
+    /// the picture doesn't trigger another render.
+    pub rendered: Option<RenderKey>,
+    /// When zoomed in: the part of the picture that should be rendered sharp.
+    pub region: Option<Region>,
+    /// The sharp rendering of a zoomed-in part, and which part it shows.
+    pub region_tex: Option<(TextureHandle, Region)>,
     pub decode_ms: f64,
     pub export_dir: PathBuf,
 }
@@ -155,6 +179,7 @@ pub struct EditorApp {
     pub(crate) luts: HashMap<String, Option<Arc<Lut3D>>>,
     /// Whether a mouse button is held (a slider or crop handle is being dragged).
     pub(crate) pointer_down: bool,
+    pub(crate) zoom: Zoom,
     pub(crate) curve_channel: usize,
     pub(crate) mixer_tab: usize,
     pub(crate) preset_name: String,
@@ -169,7 +194,7 @@ fn to_color_image(img: &RenderedImage) -> ColorImage {
 }
 
 impl EditorApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>, tab: Tab) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>, tab: Tab, start_zoomed: bool) -> Self {
         theme::apply(&cc.egui_ctx);
         let mut app = Self {
             engine: Engine::new(cc.egui_ctx.clone()),
@@ -190,6 +215,7 @@ impl EditorApp {
             presets: Vec::new(),
             luts: HashMap::new(),
             pointer_down: false,
+            zoom: if start_zoomed { Zoom { scale: Some(1.0), centre: (0.5, 0.5) } } else { Zoom::FIT },
             curve_channel: 0,
             mixer_tab: 1,
             preset_name: String::new(),
@@ -312,23 +338,37 @@ impl EditorApp {
         // picture keeps up with the mouse; the full-quality preview follows
         // as soon as the button is released.
         let level = if dragging { (doc.level + 1).min(doc.previews.len() - 1) } else { doc.level };
-        // The preview shows the whole photo, so the crop only matters to the
-        // effects that are placed relative to it.
-        let mut key = doc.adjustments.clone();
-        if key.vignette.amount == 0.0 && key.grain.amount == 0.0 {
-            key.crop = Crop::default();
-        }
-        if doc.rendered.as_ref().is_some_and(|(k, l)| *k == key && *l == level) {
+        // "Before" is the photo with no edits, framed the same way.
+        let adjustments =
+            if self.show_before { Adjustments::default().with_crop_of(&doc.adjustments) } else { doc.adjustments.clone() };
+        // Zoomed in, only the visible part is rendered, from the full-size photo
+        // (at half size while dragging).
+        let region = doc.region.map(|r| {
+            let shrink = if dragging { 2 } else { 1 };
+            Region { out_w: (r.out_w / shrink).max(1), out_h: (r.out_h / shrink).max(1), ..r }
+        });
+        if self.show_before && region.is_none() {
+            // The whole-photo "Before" picture was made when the photo opened.
             return;
         }
-        doc.rendered = Some((key, level));
+        let mut key = RenderKey { adjustments: adjustments.clone(), level, region };
+        // The whole-photo preview doesn't depend on the crop, except for the
+        // effects that are placed relative to it.
+        if region.is_none() && key.adjustments.vignette.amount == 0.0 && key.adjustments.grain.amount == 0.0 {
+            key.adjustments.crop = Crop::default();
+        }
+        if doc.rendered.as_ref() == Some(&key) {
+            return;
+        }
+        doc.rendered = Some(key);
         doc.requested_revision += 1;
         self.engine.request_render(RenderRequest {
             generation: self.generation,
             revision: doc.requested_revision,
+            region: region.map(|r| (r, doc.decoded.image.clone())),
             preview: doc.previews[level].clone(),
             full_size: doc.full_size(),
-            adjustments: doc.adjustments.clone(),
+            adjustments,
             look: doc.decoded.info.look(),
             lut,
         });
@@ -376,10 +416,19 @@ impl EditorApp {
                     self.notice = Some(Notice { title: format!("Couldn't open {}", file_name(&path)), body: error });
                     self.set_status(format!("{} could not be opened.", file_name(&path)), true);
                 }
-                Msg::Rendered { generation, revision, image, ms } if generation == self.generation => {
+                Msg::Rendered { generation, revision, image, region, ms } if generation == self.generation => {
                     if let Some(doc) = self.doc.as_mut() {
                         if revision > doc.shown_revision {
-                            doc.after_tex.set(to_color_image(&image), TEX_OPTIONS);
+                            match region {
+                                Some(region) => {
+                                    let tex = ctx.load_texture("region", to_color_image(&image), TEX_OPTIONS);
+                                    doc.region_tex = Some((tex, region));
+                                }
+                                None => {
+                                    doc.after_tex.set(to_color_image(&image), TEX_OPTIONS);
+                                    doc.region_tex = None;
+                                }
+                            }
                             doc.shown_revision = revision;
                             doc.render_ms = Some(ms);
                             doc.shown_size = (image.width, image.height);
@@ -410,6 +459,10 @@ impl EditorApp {
         self.last_export = None;
         self.crop_ui.drag = None;
         self.crop_ui.straighten_from = None;
+        // The first photo keeps a zoom asked for on the command line; later ones start fitted.
+        if self.doc.is_some() {
+            self.zoom = Zoom::FIT;
+        }
         let (adjustments, warning) = match l.saved {
             Ok(Some(a)) => (a, None),
             Ok(None) => (Adjustments::default(), None),
@@ -449,6 +502,8 @@ impl EditorApp {
             requested_revision: 0,
             shown_revision: 0,
             rendered: None,
+            region: None,
+            region_tex: None,
             render_ms: None,
             decode_ms: l.decode_ms,
             export_dir,
@@ -490,6 +545,10 @@ impl EditorApp {
                 }
                 if self.doc.is_some() && ctx.input(|i| i.key_pressed(Key::Backslash)) {
                     self.show_before = !self.show_before;
+                    self.adjustments_changed();
+                }
+                if self.doc.is_some() && self.tab != Tab::Crop && ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.is_none()) {
+                    self.zoom.scale = if self.zoom.scale.is_some() { None } else { Some(1.0) };
                 }
                 if self.tab == Tab::Crop && ctx.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)) {
                     self.tab = Tab::Edit;
@@ -555,11 +614,29 @@ impl EditorApp {
                             self.save_edit();
                         }
                         ui.add_space(12.0);
+                        let mut before_changed = false;
                         ui.add_enabled_ui(has_doc, |ui| {
-                            ui.selectable_value(&mut self.show_before, false, "After")
-                                .on_hover_text("Your edit (press \\ to toggle)");
-                            ui.selectable_value(&mut self.show_before, true, "Before")
-                                .on_hover_text("The photo as shot (press \\ to toggle)");
+                            before_changed |= ui
+                                .selectable_value(&mut self.show_before, false, "After")
+                                .on_hover_text("Your edit (press \\ to toggle)")
+                                .changed();
+                            before_changed |= ui
+                                .selectable_value(&mut self.show_before, true, "Before")
+                                .on_hover_text("The photo as shot (press \\ to toggle)")
+                                .changed();
+                        });
+                        if before_changed {
+                            self.adjustments_changed();
+                        }
+                        ui.add_space(12.0);
+                        ui.add_enabled_ui(has_doc && self.tab != Tab::Crop, |ui| {
+                            let zoomed = self.zoom.scale.is_some();
+                            if ui.selectable_label(zoomed, "100%").on_hover_text("Actual pixels (Z, or double-click the photo)").clicked() {
+                                self.zoom.scale = Some(1.0);
+                            }
+                            if ui.selectable_label(!zoomed, "Fit").on_hover_text("Whole picture (Z)").clicked() {
+                                self.zoom.scale = None;
+                            }
                         });
                     });
                 });

@@ -15,8 +15,11 @@ fn main() -> eframe::Result {
     // Options for checking the app from a script:
     //   --tab <edit|crop|presets|info>   start on that tab
     //   --expand                         start with every group in the Edit tab open
+    //   --zoom                           start zoomed to 100%
+    //   --only <Section,Section>         start with only these Edit sections open
     let mut initial = None;
     let mut start_tab = app::Tab::Edit;
+    let mut start_zoomed = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -27,6 +30,11 @@ fn main() -> eframe::Result {
                     Some("info") => app::Tab::Info,
                     _ => app::Tab::Edit,
                 };
+            }
+            Some("--zoom") => start_zoomed = true,
+            Some("--only") => {
+                let names = args.next().and_then(|t| t.to_str().map(|s| s.split(',').map(str::to_string).collect()));
+                let _ = widgets::ONLY_SECTIONS.set(names.unwrap_or_default());
             }
             Some("--expand") => widgets::EXPAND_ALL.store(true, std::sync::atomic::Ordering::Relaxed),
             _ if initial.is_none() => initial = Some(PathBuf::from(arg)),
@@ -46,5 +54,5 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("Photo Editor", options, Box::new(move |cc| Ok(Box::new(app::EditorApp::new(cc, initial, start_tab)))))
+    eframe::run_native("Photo Editor", options, Box::new(move |cc| Ok(Box::new(app::EditorApp::new(cc, initial, start_tab, start_zoomed)))))
 }

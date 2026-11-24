@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, S
 use pipeline::Crop;
 
 use crate::app::{file_name, EditorApp, Tab};
-use crate::engine::PREVIEW_EDGES;
+use crate::engine::{Region, PREVIEW_EDGES};
 use crate::theme;
 
 /// A crop edit in progress.
@@ -50,18 +50,31 @@ impl EditorApp {
                 self.empty_state(ui, area);
                 return;
             }
-            let shown_long_edge = if self.tab == Tab::Crop && !self.show_before {
-                self.crop_canvas(ui, area)
+            let (shown_long_edge, region) = if self.tab == Tab::Crop && !self.show_before {
+                (self.crop_canvas(ui, area), None)
             } else {
                 self.photo_canvas(ui, area)
             };
-            self.pick_preview_size(shown_long_edge * ui.ctx().pixels_per_point());
+            self.pick_preview_size(shown_long_edge * ui.ctx().pixels_per_point(), region);
         });
     }
 
-    /// Render the smallest preview that still fills the space the photo is shown in.
-    fn pick_preview_size(&mut self, shown_long_edge_px: f32) {
+    /// Render the smallest preview that still fills the space the photo is
+    /// shown in, or, when zoomed in past the largest preview, the visible part
+    /// from the full-size photo.
+    fn pick_preview_size(&mut self, shown_long_edge_px: f32, region: Option<Region>) {
         let Some(doc) = self.doc.as_mut() else { return };
+        if region != doc.region {
+            doc.region = region;
+            if region.is_none() {
+                doc.region_tex = None;
+            }
+            self.adjustments_changed();
+        }
+        let Some(doc) = self.doc.as_mut() else { return };
+        if doc.region.is_some() {
+            return;
+        }
         // A little slack, so a preview a few pixels short of the space isn't swapped for one twice the size.
         let level = (0..doc.previews.len())
             .rev()
@@ -73,27 +86,114 @@ impl EditorApp {
         }
     }
 
-    /// The finished (cropped) picture, fitted to the area. Returns the long
-    /// edge, in screen points, that the *whole* photo would have at this scale.
-    fn photo_canvas(&mut self, ui: &mut egui::Ui, area: Rect) -> f32 {
+    /// The finished (cropped) picture: fitted to the area, or zoomed in and
+    /// pannable. Returns the long edge, in screen points, that the *whole*
+    /// photo has at this scale, and the part to render sharp if it is zoomed
+    /// in further than the largest preview can show.
+    fn photo_canvas(&mut self, ui: &mut egui::Ui, area: Rect) -> (f32, Option<Region>) {
+        let ppp = ui.ctx().pixels_per_point();
         let doc = self.doc.as_ref().expect("checked by the caller");
         let (sw, sh) = doc.full_size();
         let (sw, sh) = (sw as f64, sh as f64);
         let crop = &doc.adjustments.crop;
         let (ow, oh) = crop.output_size_f(sw, sh);
+        let (ow, oh) = (ow as f32, oh as f32);
         let inner = area.shrink(20.0);
-        let scale = (inner.width() / ow as f32).min(inner.height() / oh as f32);
-        let rect = Rect::from_center_size(inner.center(), Vec2::new(ow as f32, oh as f32) * scale);
+        // Scales are in screen points per photo pixel.
+        let fit = (inner.width() / ow).min(inner.height() / oh);
+        let most = (8.0 / ppp).max(fit);
+        let mut scale = self.zoom.scale.map(|s| s / ppp).unwrap_or(fit).clamp(fit, most);
+        let mut centre = self.zoom.centre;
+        // Where a point of the picture (0…1) is on screen, and back.
+        let place = |scale: f32, centre: (f32, f32), u: f32, v: f32| {
+            inner.center() + Vec2::new((u - centre.0) * ow, (v - centre.1) * oh) * scale
+        };
+        let unplace = |scale: f32, centre: (f32, f32), pos: Pos2| {
+            let d = (pos - inner.center()) / scale;
+            (centre.0 + d.x / ow, centre.1 + d.y / oh)
+        };
+        // Change the zoom, keeping the picture under `pos` where it is.
+        let zoom_at = |scale: &mut f32, centre: &mut (f32, f32), pos: Pos2, new: f32| {
+            let under = unplace(*scale, *centre, pos);
+            *scale = new.clamp(fit, most);
+            let d = (pos - inner.center()) / *scale;
+            *centre = (under.0 - d.x / ow, under.1 - d.y / oh);
+        };
+
+        let resp = ui.interact(area, ui.scope_id().with("photo"), Sense::click_and_drag());
+        if let Some(pos) = resp.hover_pos() {
+            let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                let new = scale * (wheel * 0.004).exp();
+                zoom_at(&mut scale, &mut centre, pos, new);
+            }
+        }
+        if resp.double_clicked() {
+            let pos = resp.interact_pointer_pos().unwrap_or(inner.center());
+            let new = if scale > fit * 1.01 { fit } else { 1.0 / ppp };
+            zoom_at(&mut scale, &mut centre, pos, new);
+        }
+        let zoomed = scale > fit * 1.001;
+        if zoomed {
+            if resp.dragged() {
+                let d = resp.drag_delta() / scale;
+                centre = (centre.0 - d.x / ow, centre.1 - d.y / oh);
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            } else if resp.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            }
+        }
+        // Keep the picture over the area: centred if it is smaller, never dragged off if larger.
+        let half = (inner.width() / (2.0 * ow * scale), inner.height() / (2.0 * oh * scale));
+        centre.0 = if half.0 >= 0.5 { 0.5 } else { centre.0.clamp(half.0, 1.0 - half.0) };
+        centre.1 = if half.1 >= 0.5 { 0.5 } else { centre.1.clamp(half.1, 1.0 - half.1) };
+        self.zoom.scale = zoomed.then_some(scale * ppp);
+        self.zoom.centre = centre;
+
+        let rect = Rect::from_min_max(place(scale, centre, 0.0, 0.0), place(scale, centre, 1.0, 1.0));
         let painter = ui.painter_at(area);
+        let doc = self.doc.as_ref().expect("checked by the caller");
         let tex = if self.show_before { &doc.before_tex } else { &doc.after_tex };
         let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
-        draw_quad(&painter, tex.id(), corners, crop.corners_uv(sw, sh));
+        draw_quad(&painter, tex.id(), corners, doc.adjustments.crop.corners_uv(sw, sh));
+
+        // Zoomed in past what the largest preview can show sharply: ask for the
+        // visible part from the full-size photo, and draw the last one received on top.
+        let whole_long_edge = (sw.max(sh) as f32) * scale;
+        let mut region = None;
+        if whole_long_edge * ppp > PREVIEW_EDGES[0] as f32 * 1.05 {
+            let visible = rect.intersect(area);
+            if visible.width() > 1.0 && visible.height() > 1.0 {
+                let (u0, v0) = unplace(scale, centre, visible.min);
+                let (u1, v1) = unplace(scale, centre, visible.max);
+                // Rounded a little, so tiny pointer jitter doesn't ask for a new render every frame.
+                let round = |v: f32| (v as f64 * 4096.0).round() / 4096.0;
+                region = Some(Region {
+                    unit: [round(u0).max(0.0), round(v0).max(0.0), round(u1).min(1.0), round(v1).min(1.0)],
+                    out_w: ((visible.width() * ppp).round() as usize).max(1),
+                    out_h: ((visible.height() * ppp).round() as usize).max(1),
+                });
+            }
+            if let Some((sharp, part)) = &doc.region_tex {
+                let at = Rect::from_min_max(
+                    place(scale, centre, part.unit[0] as f32, part.unit[1] as f32),
+                    place(scale, centre, part.unit[2] as f32, part.unit[3] as f32),
+                );
+                painter.image(sharp.id(), at, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            }
+        }
         if self.show_before {
-            let badge = Rect::from_min_size(rect.min + Vec2::new(10.0, 10.0), Vec2::new(66.0, 22.0));
+            let badge = Rect::from_min_size(rect.min.max(area.min) + Vec2::new(10.0, 10.0), Vec2::new(66.0, 22.0));
             painter.rect_filled(badge, CornerRadius::same(4), Color32::from_black_alpha(170));
             painter.text(badge.center(), egui::Align2::CENTER_CENTER, "BEFORE", egui::FontId::proportional(12.0), Color32::WHITE);
         }
-        (sw.max(sh) as f32) * scale
+        if zoomed {
+            let label = format!("{:.0}%", scale * ppp * 100.0);
+            let badge = Rect::from_min_size(Pos2::new(area.max.x - 66.0, area.min.y + 10.0), Vec2::new(56.0, 22.0));
+            painter.rect_filled(badge, CornerRadius::same(4), Color32::from_black_alpha(170));
+            painter.text(badge.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), Color32::WHITE);
+        }
+        (whole_long_edge, region)
     }
 
     /// Crop mode: the whole photo with the crop rectangle on top.

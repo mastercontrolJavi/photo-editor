@@ -1,7 +1,7 @@
 //! The side panel: Edit, Crop, Presets and Info.
 
 use eframe::egui::{self, Color32, Margin, RichText};
-use pipeline::adjust::{Wheel, BAND_HUES, BAND_NAMES, EXPOSURE_RANGE};
+use pipeline::adjust::{Wheel, BAND_HUES, BAND_NAMES, DEFAULT_SHARPENING, DEFRINGE, EXPOSURE_RANGE, SHARPEN_AMOUNT, SHARPEN_RADIUS};
 use pipeline::decode::SourceKind;
 use pipeline::geometry::ANGLE_RANGE;
 use pipeline::{preset, Adjustments, Crop};
@@ -46,10 +46,13 @@ impl EditorApp {
     fn edit_tab(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
         let (mut curve_channel, mut mixer_tab) = (self.curve_channel, self.mixer_tab);
+        let mut auto = false;
         let doc = self.doc.as_mut().expect("the panel is only shown with a photo open");
+        let (chromatic, has_lens_data) = (doc.decoded.info.chromatic, doc.decoded.info.has_lens_opcodes);
         let a = &mut doc.adjustments;
 
         ui.horizontal(|ui| {
+            auto = ui.button("Auto").on_hover_text("Set the Light sliders from the photo's brightness").clicked();
             changed |= ui.toggle_value(&mut a.bw, "B&W").on_hover_text("Black & white").changed();
             let untouched = a.clone().with_crop_of(&Adjustments::default()).is_default();
             if ui.add_enabled(!untouched, egui::Button::new("Reset all")).on_hover_text("Back to the photo as shot. The crop is kept.").clicked() {
@@ -88,6 +91,13 @@ impl EditorApp {
                     points.clear();
                     changed = true;
                 }
+                ui.add_space(6.0);
+                heading(ui, "PARAMETRIC");
+                let p = &mut a.curve.parametric;
+                changed |= slider(ui, &mut p.highlights, SliderSpec::percent("Highlights"));
+                changed |= slider(ui, &mut p.lights, SliderSpec::percent("Lights"));
+                changed |= slider(ui, &mut p.darks, SliderSpec::percent("Darks"));
+                changed |= slider(ui, &mut p.shadows, SliderSpec::percent("Shadows"));
             });
         });
 
@@ -153,6 +163,7 @@ impl EditorApp {
         });
 
         section(ui, "Effects", true, |ui| {
+            changed |= slider(ui, &mut a.texture, SliderSpec::percent("Texture"));
             changed |= slider(ui, &mut a.clarity, SliderSpec::percent("Clarity"));
             changed |= slider(ui, &mut a.dehaze, SliderSpec::percent("Dehaze"));
             changed |= slider(ui, &mut a.vignette.amount, SliderSpec::percent("Vignette"));
@@ -165,6 +176,55 @@ impl EditorApp {
             subsection(ui, "Grain options", false, |ui| {
                 changed |= slider(ui, &mut a.grain.size, SliderSpec::amount("Size", 25.0));
                 changed |= slider(ui, &mut a.grain.roughness, SliderSpec::amount("Roughness", 50.0));
+            });
+        });
+
+        section(ui, "Detail", true, |ui| {
+            let sharpening = SliderSpec { range: SHARPEN_AMOUNT, ..SliderSpec::amount("Sharpening", DEFAULT_SHARPENING) };
+            changed |= slider(ui, &mut a.sharpen.amount, sharpening);
+            let touched = a.sharpen.radius != 1.0 || a.sharpen.detail != 25.0 || a.sharpen.masking != 0.0;
+            subsection(ui, "Sharpening options", touched, |ui| {
+                let radius = SliderSpec { range: SHARPEN_RADIUS, step: 0.1, decimals: 1, ..SliderSpec::amount("Radius", 1.0) };
+                changed |= slider(ui, &mut a.sharpen.radius, radius);
+                changed |= slider(ui, &mut a.sharpen.detail, SliderSpec::amount("Detail", 25.0));
+                changed |= slider(ui, &mut a.sharpen.masking, SliderSpec::amount("Masking", 0.0));
+            });
+            ui.add_space(4.0);
+            heading(ui, "NOISE REDUCTION");
+            changed |= slider(ui, &mut a.noise.luminance, SliderSpec::amount("Luminance", 0.0));
+            changed |= slider(ui, &mut a.noise.color, SliderSpec::amount("Color", 0.0));
+            ui.label(
+                RichText::new("Sharpening and noise only show properly at 100%. Press Z or double-click the photo to zoom in.")
+                    .color(theme::MUTED)
+                    .small(),
+            );
+        });
+
+        section(ui, "Optics", false, |ui| {
+            let note = if has_lens_data {
+                "This file carries its own lens-correction data, which this app doesn't apply yet."
+            } else {
+                "The camera already corrected this photo for its lens before saving it. These controls are for touch-ups."
+            };
+            ui.label(RichText::new(note).color(theme::MUTED).small());
+            ui.add_space(4.0);
+            changed |= ui.checkbox(&mut a.optics.remove_ca, "Remove chromatic aberration").changed();
+            if a.optics.remove_ca && chromatic == [0.0; 2] {
+                ui.label(
+                    RichText::new("No colour misalignment was measured in this photo, so there is nothing to remove.")
+                        .color(theme::MUTED)
+                        .small(),
+                );
+            }
+            ui.add_space(4.0);
+            changed |= slider(ui, &mut a.optics.distortion, SliderSpec::percent("Distortion"));
+            changed |= slider(ui, &mut a.optics.vignetting, SliderSpec::percent("Lens vignetting"));
+            let fringes = a.optics.defringe_purple != 0.0 || a.optics.defringe_green != 0.0;
+            subsection(ui, "Defringe", fringes, |ui| {
+                let purple = SliderSpec { range: DEFRINGE, ..SliderSpec::amount("Purple amount", 0.0) }.dot(Color32::from_rgb(170, 90, 220));
+                let green = SliderSpec { range: DEFRINGE, ..SliderSpec::amount("Green amount", 0.0) }.dot(Color32::from_rgb(90, 190, 100));
+                changed |= slider(ui, &mut a.optics.defringe_purple, purple);
+                changed |= slider(ui, &mut a.optics.defringe_green, green);
             });
         });
 
@@ -185,12 +245,19 @@ impl EditorApp {
 
         ui.add_space(6.0);
         ui.label(
-            RichText::new("Sharpening, noise reduction, texture and lens corrections are not in this version yet.")
-                .color(theme::MUTED)
-                .small(),
+            RichText::new("Not in this version yet: Geometry, Point Color, masking and healing.").color(theme::MUTED).small(),
         );
         if let Some(w) = &self.sidecar_warning {
             ui.label(RichText::new(w).color(theme::WARN).small());
+        }
+        if auto {
+            // Judge the photo as shot, from the smallest preview (it only needs the overall brightness).
+            if let Some(small) = doc.previews.last() {
+                let unedited =
+                    pipeline::render_preview(small, &Adjustments::default(), &doc.decoded.info.look(), None, doc.full_size());
+                doc.adjustments = pipeline::auto::auto_tone(&unedited, &doc.adjustments);
+                changed = true;
+            }
         }
         self.curve_channel = curve_channel;
         self.mixer_tab = mixer_tab;

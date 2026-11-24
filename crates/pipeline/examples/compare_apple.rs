@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use image::ImageDecoder;
 use pipeline::color::{srgb_decode, srgb_encode};
-use pipeline::{decode_file, render_srgb8, Adjustments, LinearImage, Look, RenderedImage};
+use pipeline::{decode_file, render_preview, render_srgb8, Adjustments, LinearImage, Look, RenderedImage};
 use rawler::decoders::RawDecodeParams;
 use rawler::rawsource::RawSource;
 
@@ -53,7 +53,8 @@ fn compare(path: &Path, out: &Path) -> Result<(), String> {
         if look.tone_curve.is_some() { "applied" } else { "none" },
         if decoded.info.gain_map_applied { "applied" } else { "none" }
     );
-    let render = |exposure: f32| to_linear(&render_srgb8(&small, &Adjustments { exposure, ..Default::default() }, &look));
+    let full = (decoded.image.width, decoded.image.height);
+    let render = |exposure: f32| to_linear(&render_preview(&small, &Adjustments { exposure, ..Default::default() }, &look, None, full));
     let ours = render(0.0);
     let (w, h) = (ours.width, ours.height);
 
@@ -124,7 +125,10 @@ fn compare(path: &Path, out: &Path) -> Result<(), String> {
             both.pixels[y * both.width + w + gap + x] = camera.get(x, y);
         }
     }
-    let rendered = render_srgb8(&both, &Adjustments::default(), &Look::neutral());
+    // The sheet is already finished pixels: encode it as it is, with no sharpening on top.
+    let mut as_is = Adjustments::default();
+    as_is.sharpen.amount = 0.0;
+    let rendered = render_srgb8(&both, &as_is, &Look::neutral());
     let jpeg = pipeline::export::encode_jpeg(&rendered, 90).map_err(|e| e.to_string())?;
     let dest = out.join("compare").join(format!("{stem}.jpg"));
     std::fs::write(&dest, jpeg).map_err(|e| e.to_string())?;

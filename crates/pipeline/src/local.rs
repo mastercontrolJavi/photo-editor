@@ -105,7 +105,7 @@ impl LocalMaps {
 }
 
 /// Mean over a (2r+1)² window; windows are cut off at the image edge.
-fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+pub(crate) fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     let mut tmp = vec![0.0f32; w * h];
     let mut prefix = vec![0.0f64; w.max(h) + 1];
     for y in 0..h {

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Instant;
 
 use pipeline::{
-    decode_file, export_jpeg, render, render_srgb8, sidecar, Adjustments, DecodedImage, ExportOptions, LinearImage, Look,
+    decode_file, export_jpeg, render, render_preview, sidecar, Adjustments, DecodedImage, ExportOptions, LinearImage, Look,
     Lut3D, RenderedImage, Scene, View, PREVIEW_LONG_EDGE,
 };
 
@@ -21,7 +21,7 @@ pub const PREVIEW_EDGES: [usize; 3] = [PREVIEW_LONG_EDGE, 1600, 1000];
 pub enum Msg {
     Loaded(Box<Loaded>),
     LoadFailed { generation: u64, path: PathBuf, error: String },
-    Rendered { generation: u64, revision: u64, image: RenderedImage, ms: f64 },
+    Rendered { generation: u64, revision: u64, image: RenderedImage, region: Option<Region>, ms: f64 },
     Exported { result: Result<PathBuf, String>, ms: f64 },
 }
 
@@ -38,9 +38,20 @@ pub struct Loaded {
     pub decode_ms: f64,
 }
 
+/// Part of the finished picture to render from the full-size photo (when zoomed in).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Region {
+    /// `[left, top, right, bottom]`, each 0…1 of the finished picture.
+    pub unit: [f64; 4],
+    pub out_w: usize,
+    pub out_h: usize,
+}
+
 pub struct RenderRequest {
     pub generation: u64,
     pub revision: u64,
+    /// Render this part from the full-size photo instead of the whole preview.
+    pub region: Option<(Region, Arc<LinearImage>)>,
     pub preview: Arc<LinearImage>,
     /// Size of the full photo, so the crop and grain scale correctly.
     pub full_size: (usize, usize),
@@ -100,7 +111,8 @@ impl Engine {
                         let from = previews.last().map(|p| p.as_ref()).unwrap_or(decoded.image.as_ref());
                         previews.push(Arc::new(from.downscale_to_fit(edge)));
                     }
-                    let before = render_srgb8(&previews[0], &Adjustments::default(), &decoded.info.look());
+                    let full = (decoded.image.width, decoded.image.height);
+                    let before = render_preview(&previews[0], &Adjustments::default(), &decoded.info.look(), None, full);
                     let saved = sidecar::load(&path).map_err(|e| e.to_string());
                     Msg::Loaded(Box::new(Loaded { generation, path, decoded, previews, before, saved, decode_ms }))
                 }
@@ -151,13 +163,22 @@ fn render_loop(shared: Arc<Shared>, tx: Sender<Msg>, ctx: eframe::egui::Context)
             }
         };
         let started = Instant::now();
-        let (w, h) = (job.preview.width, job.preview.height);
-        let scene = Scene { image: &job.preview, look: &job.look, lut: job.lut.as_deref() };
-        // The whole photo is rendered; the crop is applied when it is drawn.
-        let view = View::preview(&job.adjustments.crop, w, h, job.full_size.0, job.full_size.1);
-        let image = render(&scene, &job.adjustments, &view, w, h);
+        let (image, region) = match &job.region {
+            Some((region, full)) => {
+                let scene = Scene { image: full, look: &job.look, lut: job.lut.as_deref() };
+                let view = View::region(&job.adjustments.crop, full.width, full.height, region.unit, region.out_w, region.out_h);
+                (render(&scene, &job.adjustments, &view, region.out_w, region.out_h), Some(*region))
+            }
+            None => {
+                let (w, h) = (job.preview.width, job.preview.height);
+                let scene = Scene { image: &job.preview, look: &job.look, lut: job.lut.as_deref() };
+                // The whole photo is rendered; the crop is applied when it is drawn.
+                let view = View::preview(&job.adjustments.crop, w, h, job.full_size.0, job.full_size.1);
+                (render(&scene, &job.adjustments, &view, w, h), None)
+            }
+        };
         let ms = started.elapsed().as_secs_f64() * 1000.0;
-        if tx.send(Msg::Rendered { generation: job.generation, revision: job.revision, image, ms }).is_err() {
+        if tx.send(Msg::Rendered { generation: job.generation, revision: job.revision, image, region, ms }).is_err() {
             return;
         }
         ctx.request_repaint();

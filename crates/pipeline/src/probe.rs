@@ -176,6 +176,16 @@ pub fn report(path: &std::path::Path) -> String {
             let _ = writeln!(s, "Compression: {} ({:?})", t.compression_name(), t.compression);
             let _ = writeln!(s, "BaselineExposure: {:+.2} EV", i.baseline_exposure);
             let _ = writeln!(s, "Semantic mask IFDs: {}", t.semantic_masks);
+            let _ = writeln!(
+                s,
+                "Lens data in the file: {}",
+                if i.has_lens_opcodes { "yes (not applied yet)" } else { "none (already corrected by the camera, or not needed)" }
+            );
+            let _ = writeln!(
+                s,
+                "Measured colour fringing: red {:+.5}, blue {:+.5} (0 = none; 0.0010 is about 5 pixels at the corner of a 48 MP photo)",
+                i.chromatic[0], i.chromatic[1]
+            );
             let _ = writeln!(s, "\nRendering metadata:");
             for (tag, name, use_, what) in KNOWN_TAGS {
                 if t.has(*tag) {

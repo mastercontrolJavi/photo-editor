@@ -368,6 +368,7 @@ fn map_lightroom(v: &Values) -> (Map<String, Value>, Vec<String>) {
         ("Whites2012", "whites"),
         ("Blacks2012", "blacks"),
         ("Clarity2012", "clarity"),
+        ("Texture", "texture"),
         ("Dehaze", "dehaze"),
         ("Vibrance", "vibrance"),
         ("Saturation", "saturation"),
@@ -447,6 +448,59 @@ fn map_lightroom(v: &Values) -> (Map<String, Value>, Vec<String>) {
         out.insert("curve".into(), Value::Object(curve));
     }
 
+    // The parametric curve.
+    let mut parametric = Map::new();
+    put(&mut parametric, "shadows", "ParametricShadows");
+    put(&mut parametric, "darks", "ParametricDarks");
+    put(&mut parametric, "lights", "ParametricLights");
+    put(&mut parametric, "highlights", "ParametricHighlights");
+    if !parametric.is_empty() {
+        let curve = out.entry("curve").or_insert_with(|| Value::Object(Map::new()));
+        if let Some(obj) = curve.as_object_mut() {
+            obj.insert("parametric".into(), Value::Object(parametric));
+        }
+    }
+
+    let mut calibration = Map::new();
+    for (ours, theirs) in [
+        ("red_hue", "RedHue"),
+        ("red_saturation", "RedSaturation"),
+        ("green_hue", "GreenHue"),
+        ("green_saturation", "GreenSaturation"),
+        ("blue_hue", "BlueHue"),
+        ("blue_saturation", "BlueSaturation"),
+    ] {
+        put(&mut calibration, ours, theirs);
+    }
+    if !calibration.is_empty() {
+        out.insert("calibration".into(), Value::Object(calibration));
+    }
+
+    let mut sharpen = Map::new();
+    put(&mut sharpen, "amount", "Sharpness");
+    put(&mut sharpen, "radius", "SharpenRadius");
+    put(&mut sharpen, "detail", "SharpenDetail");
+    put(&mut sharpen, "masking", "SharpenEdgeMasking");
+    if !sharpen.is_empty() {
+        out.insert("sharpen".into(), Value::Object(sharpen));
+    }
+    let mut noise = Map::new();
+    put(&mut noise, "luminance", "LuminanceSmoothing");
+    put(&mut noise, "color", "ColorNoiseReduction");
+    if !noise.is_empty() {
+        out.insert("noise".into(), Value::Object(noise));
+    }
+    let mut optics = Map::new();
+    put(&mut optics, "defringe_purple", "DefringePurpleAmount");
+    put(&mut optics, "defringe_green", "DefringeGreenAmount");
+    put(&mut optics, "distortion", "LensManualDistortionAmount");
+    if let Some(Val::Num(n)) = v.get("AutoLateralCA") {
+        optics.insert("remove_ca".into(), json!(*n != 0.0));
+    }
+    if !optics.is_empty() {
+        out.insert("optics".into(), Value::Object(optics));
+    }
+
     let mut vignette = Map::new();
     put(&mut vignette, "amount", "PostCropVignetteAmount");
     put(&mut vignette, "midpoint", "PostCropVignetteMidpoint");
@@ -477,20 +531,10 @@ fn map_lightroom(v: &Values) -> (Map<String, Value>, Vec<String>) {
             .any(|k| v.contains_key(*k)),
         "Masks (local adjustments)",
     );
-    note(
-        nonzero(&["ShadowTint", "RedHue", "RedSaturation", "GreenHue", "GreenSaturation", "BlueHue", "BlueSaturation"]),
-        "Calibration (colour primaries)",
-    );
-    note(
-        nonzero(&["ParametricShadows", "ParametricDarks", "ParametricLights", "ParametricHighlights"]),
-        "Parametric tone curve",
-    );
-    note(nonzero(&["Texture"]), "Texture");
-    note(num("Sharpness").is_some_and(|n| n > 0.0), "Sharpening");
-    note(nonzero(&["LuminanceSmoothing"]), "Noise reduction");
+    note(nonzero(&["ShadowTint"]), "Calibration shadow tint");
     let custom_wb = matches!(v.get("WhiteBalance"), Some(Val::Text(t)) if t != "As Shot");
     note(custom_wb || num("Temperature").is_some(), "White balance in Kelvin (kept as shot)");
-    note(nonzero(&["LensProfileEnable", "AutoLateralCA"]), "Lens corrections");
+    note(nonzero(&["LensProfileEnable"]), "Lens profile corrections");
     note(
         nonzero(&["PerspectiveVertical", "PerspectiveHorizontal", "PerspectiveRotate", "PerspectiveScale", "PerspectiveAspect"]),
         "Geometry",
@@ -699,10 +743,8 @@ mod tests {
         assert!(a.curve.red.is_empty(), "a straight channel curve is no curve");
         assert_eq!((a.grain.amount, a.vignette.amount, a.vignette.midpoint), (20.0, -15.0, 50.0));
         assert!(!a.bw);
-        for what in ["Texture", "Sharpening", "Calibration (colour primaries)"] {
-            assert!(p.unsupported.iter().any(|u| u == what), "{what} should be reported: {:?}", p.unsupported);
-        }
-        assert!(!p.unsupported.iter().any(|u| u.contains("White balance")));
+        assert_eq!((a.texture, a.sharpen.amount, a.sharpen.radius, a.calibration.red_hue), (15.0, 40.0, 1.0, 10.0));
+        assert!(p.unsupported.is_empty(), "everything in this preset is supported now: {:?}", p.unsupported);
     }
 
     #[test]

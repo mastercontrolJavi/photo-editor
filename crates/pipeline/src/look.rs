@@ -24,6 +24,8 @@ pub struct Look {
     pub tone_curve: Option<Arc<ToneCurve>>,
     /// Helper maps for the local sliders (Shadows, Highlights, Clarity, Dehaze).
     pub local: Option<Arc<LocalMaps>>,
+    /// Measured colour fringing of this photo's lens (see `lens::chromatic_scales`).
+    pub chromatic: [f32; 2],
 }
 
 impl Look {

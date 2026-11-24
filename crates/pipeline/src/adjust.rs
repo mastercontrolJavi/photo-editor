@@ -95,6 +95,17 @@ impl Default for Grain {
     }
 }
 
+/// The "parametric" curve: four sliders that each bend one part of the tone
+/// range (each −100 … +100).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Parametric {
+    pub highlights: f32,
+    pub lights: f32,
+    pub darks: f32,
+    pub shadows: f32,
+}
+
 /// Point curves. Each is a list of `[input, output]` pairs in 0…1; an empty
 /// list is a straight line (no change).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -104,12 +115,81 @@ pub struct ToneCurves {
     pub red: Vec<[f32; 2]>,
     pub green: Vec<[f32; 2]>,
     pub blue: Vec<[f32; 2]>,
+    pub parametric: Parametric,
 }
 
 impl ToneCurves {
     pub fn is_identity(&self) -> bool {
-        self.rgb.is_empty() && self.red.is_empty() && self.green.is_empty() && self.blue.is_empty()
+        self.rgb.is_empty()
+            && self.red.is_empty()
+            && self.green.is_empty()
+            && self.blue.is_empty()
+            && self.parametric == Parametric::default()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sharpen {
+    /// 0 … 150.
+    pub amount: f32,
+    /// 0.5 … 3.0 pixels.
+    pub radius: f32,
+    /// 0 … 100: how much very fine detail is sharpened too.
+    pub detail: f32,
+    /// 0 … 100: keep sharpening to edges, away from smooth areas.
+    pub masking: f32,
+}
+
+/// Sharpening applied to a photo that hasn't been edited, as in Lightroom.
+/// RAW data is slightly soft until it is sharpened; the camera's own JPEGs
+/// are sharpened more than this.
+pub const DEFAULT_SHARPENING: f32 = 40.0;
+
+impl Default for Sharpen {
+    fn default() -> Self {
+        Self { amount: DEFAULT_SHARPENING, radius: 1.0, detail: 25.0, masking: 0.0 }
+    }
+}
+
+pub const SHARPEN_AMOUNT: (f32, f32) = (0.0, 150.0);
+pub const SHARPEN_RADIUS: (f32, f32) = (0.5, 3.0);
+pub const DEFRINGE: (f32, f32) = (0.0, 20.0);
+
+/// Noise reduction, each 0 … 100.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoiseReduction {
+    pub luminance: f32,
+    pub color: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Optics {
+    /// Line up colour fringes caused by the lens.
+    pub remove_ca: bool,
+    /// −100 … +100; positive corrects barrel distortion.
+    pub distortion: f32,
+    /// −100 … +100; positive brightens the corners.
+    pub vignetting: f32,
+    /// 0 … 20.
+    pub defringe_purple: f32,
+    /// 0 … 20.
+    pub defringe_green: f32,
+}
+
+/// Lightroom's "Calibration": shifts the camera's three primary colours.
+/// Each value is −100 … +100. Mostly reached through imported presets.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Calibration {
+    pub red_hue: f32,
+    pub red_saturation: f32,
+    pub green_hue: f32,
+    pub green_saturation: f32,
+    pub blue_hue: f32,
+    pub blue_saturation: f32,
 }
 
 /// A colour look-up table (`.cube` file) applied on top of the edit.
@@ -151,11 +231,18 @@ pub struct Adjustments {
     /// Brightness of each colour band in black & white (−100 … +100).
     pub bw_mix: [f32; 8],
     pub grading: ColorGrading,
+    pub calibration: Calibration,
     // ---- Effects
+    pub texture: f32,
     pub clarity: f32,
     pub dehaze: f32,
     pub vignette: Vignette,
     pub grain: Grain,
+    // ---- Detail
+    pub sharpen: Sharpen,
+    pub noise: NoiseReduction,
+    // ---- Optics
+    pub optics: Optics,
     // ---- Look
     pub lut: Option<LutUse>,
     // ---- Geometry
@@ -216,6 +303,31 @@ impl Adjustments {
         }
         g.blending = fix(g.blending, AMOUNT, 50.0);
         g.balance = pct(g.balance);
+        let p = &mut self.curve.parametric;
+        *p = Parametric { highlights: pct(p.highlights), lights: pct(p.lights), darks: pct(p.darks), shadows: pct(p.shadows) };
+        let c = &mut self.calibration;
+        *c = Calibration {
+            red_hue: pct(c.red_hue),
+            red_saturation: pct(c.red_saturation),
+            green_hue: pct(c.green_hue),
+            green_saturation: pct(c.green_saturation),
+            blue_hue: pct(c.blue_hue),
+            blue_saturation: pct(c.blue_saturation),
+        };
+        self.texture = pct(self.texture);
+        let s = &mut self.sharpen;
+        *s = Sharpen {
+            amount: fix(s.amount, SHARPEN_AMOUNT, DEFAULT_SHARPENING),
+            radius: fix(s.radius, SHARPEN_RADIUS, 1.0),
+            detail: fix(s.detail, AMOUNT, 25.0),
+            masking: fix(s.masking, AMOUNT, 0.0),
+        };
+        self.noise = NoiseReduction { luminance: fix(self.noise.luminance, AMOUNT, 0.0), color: fix(self.noise.color, AMOUNT, 0.0) };
+        let o = &mut self.optics;
+        o.distortion = pct(o.distortion);
+        o.vignetting = pct(o.vignetting);
+        o.defringe_purple = fix(o.defringe_purple, DEFRINGE, 0.0);
+        o.defringe_green = fix(o.defringe_green, DEFRINGE, 0.0);
         self.clarity = pct(self.clarity);
         self.dehaze = pct(self.dehaze);
         let v = &mut self.vignette;
@@ -251,6 +363,36 @@ impl Adjustments {
         self.crop = other.crop;
         self
     }
+}
+
+/// Sample the parametric curve into `n` evenly spaced values on 0…1.
+/// Returns `None` when all four sliders are at zero.
+pub fn parametric_table(p: &Parametric, n: usize) -> Option<Vec<f32>> {
+    if *p == Parametric::default() {
+        return None;
+    }
+    // Each slider lifts or lowers a soft bump centred on its part of the range.
+    let regions = [(0.12, p.shadows), (0.37, p.darks), (0.63, p.lights), (0.88, p.highlights)];
+    let mut table: Vec<f32> = (0..n)
+        .map(|i| {
+            let x = i as f32 / (n - 1) as f32;
+            // Black and white stay where they are.
+            let ends = (x / 0.05).min((1.0 - x) / 0.05).min(1.0);
+            let shift: f32 = regions
+                .iter()
+                .map(|(centre, value)| {
+                    let d = ((x - centre) / 0.3).abs().min(1.0);
+                    value / 100.0 * 0.16 * (1.0 - d * d).powi(2)
+                })
+                .sum();
+            (x + shift * ends).clamp(0.0, 1.0)
+        })
+        .collect();
+    // Opposite sliders pushed hard could make the curve dip; never let it.
+    for i in 1..n {
+        table[i] = table[i].max(table[i - 1]);
+    }
+    Some(table)
 }
 
 /// Sample a point curve into `n` evenly spaced values on 0…1, using a smooth
@@ -326,6 +468,18 @@ mod tests {
         assert!(t.windows(2).all(|w| w[1] >= w[0] - 1e-5), "must not dip between rising points");
         assert!(t.iter().all(|v| (0.1 - 1e-4..=0.9 + 1e-4).contains(v)));
         assert!(curve_table(&[], 16).is_none());
+    }
+
+    #[test]
+    fn parametric_curve_bends_only_its_region_and_never_dips() {
+        let lift = Parametric { shadows: 80.0, ..Default::default() };
+        let t = parametric_table(&lift, 101).unwrap();
+        assert!(t[12] > 0.12 + 0.08, "shadows lifted: {}", t[12]);
+        assert!((t[75] - 0.75).abs() < 0.01 && t[0] == 0.0 && t[100] == 1.0);
+        let wild = Parametric { shadows: 100.0, darks: -100.0, lights: 100.0, highlights: -100.0 };
+        let t = parametric_table(&wild, 501).unwrap();
+        assert!(t.windows(2).all(|w| w[1] >= w[0]));
+        assert!(parametric_table(&Parametric::default(), 16).is_none());
     }
 
     #[test]

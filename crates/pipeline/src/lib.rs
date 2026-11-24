@@ -18,14 +18,17 @@
 //! the input size.
 
 pub mod adjust;
+pub mod auto;
 pub mod color;
 pub mod decode;
+pub mod detail;
 pub mod error;
 pub mod export;
 pub mod fixtures;
 pub mod geometry;
 pub mod icc;
 pub mod image;
+pub mod lens;
 pub mod local;
 pub mod look;
 pub mod lut;
@@ -43,7 +46,7 @@ pub use image::LinearImage;
 pub use look::{GainTableMap, Look, ToneCurve};
 pub use lut::Lut3D;
 pub use preset::Preset;
-pub use render::{render, render_srgb8, RenderedImage, Scene, View};
+pub use render::{render, render_preview, render_srgb8, RenderedImage, Scene, View};
 
 /// Longest edge, in pixels, of the cached preview image.
 pub const PREVIEW_LONG_EDGE: usize = 2560;

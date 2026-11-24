@@ -4,6 +4,8 @@
 //!
 //! Order of operations for each pixel:
 //!
+//! 0. Lens corrections and the detail sliders (Texture, Sharpening, Noise
+//!    Reduction, Defringe), which need each pixel's neighbours.
 //! 1. Dehaze (on the photo's own values).
 //! 2. White balance + exposure (one 3×3 matrix).
 //! 3. Tone: Clarity, Shadows, Highlights, Whites, Blacks, Contrast. These work
@@ -20,7 +22,9 @@ use std::sync::OnceLock;
 
 use rayon::prelude::*;
 
-use crate::adjust::{curve_table, Adjustments, Wheel, BAND_HUES};
+use crate::adjust::{curve_table, parametric_table, Adjustments, Calibration, Wheel, BAND_HUES};
+use crate::detail::Detail;
+use crate::lens::Lens;
 use crate::color::{self, fast_exp2, fast_pow, Mat3};
 use crate::geometry::{Affine, Crop};
 use crate::image::LinearImage;
@@ -83,6 +87,23 @@ impl View {
         View { to_source: None, to_crop, crop_px: (ow as f32, oh as f32), px_scale: (fw / preview_w as f64) as f32 }
     }
 
+    /// Part of the finished picture, read from the full-size photo: what the
+    /// app shows when zoomed in. `unit` is the part wanted as
+    /// `[left, top, right, bottom]` in 0…1 of the finished picture, rendered
+    /// into `out_w × out_h` pixels.
+    pub fn region(crop: &Crop, full_w: usize, full_h: usize, unit: [f64; 4], out_w: usize, out_h: usize) -> Self {
+        let (uw, uh) = (unit[2] - unit[0], unit[3] - unit[1]);
+        // Output pixel → position in the finished picture (0…1).
+        let to_unit = Affine { a: uw / out_w as f64, b: 0.0, c: unit[0], d: 0.0, e: uh / out_h as f64, f: unit[1] };
+        let (ow, oh) = crop.output_size_f(full_w as f64, full_h as f64);
+        View {
+            to_source: Some(to_unit.then(&crop.unit_to_source(full_w as f64, full_h as f64))),
+            to_crop: to_unit.then(&Affine { a: 2.0, b: 0.0, c: -1.0, d: 0.0, e: 2.0, f: -1.0 }),
+            crop_px: (ow as f32, oh as f32),
+            px_scale: (ow * uw / out_w as f64) as f32,
+        }
+    }
+
     /// The finished, cropped picture at full size. Returns the view and the
     /// output size in pixels.
     pub fn export(crop: &Crop, full_w: usize, full_h: usize) -> (Self, usize, usize) {
@@ -137,8 +158,40 @@ fn encode_f(table: &[f32], v: f32) -> f32 {
 pub fn pixel_matrix(adj: &Adjustments, baseline_exposure_ev: f32) -> Mat3 {
     let gain = 2f32.powf(adj.exposure + baseline_exposure_ev);
     let mut m = color::white_balance_matrix(adj.temperature, adj.tint);
+    if let Some(cal) = calibration_matrix(&adj.calibration) {
+        m = color::mul(&cal, &m);
+    }
     m.iter_mut().flatten().for_each(|v| *v *= gain);
     m
+}
+
+/// Lightroom's Calibration sliders as a colour matrix: each primary is nudged
+/// towards a neighbour (hue) and towards or away from grey (saturation), and
+/// white is kept white. This follows the direction and rough strength of
+/// Lightroom's sliders; it is not Adobe's formula.
+fn calibration_matrix(c: &Calibration) -> Option<Mat3> {
+    if *c == Calibration::default() {
+        return None;
+    }
+    let settings = [(c.red_hue, c.red_saturation), (c.green_hue, c.green_saturation), (c.blue_hue, c.blue_saturation)];
+    let mut m = [[0.0f32; 3]; 3];
+    for (i, (hue, saturation)) in settings.iter().enumerate() {
+        // Positive hue: red → orange, green → cyan, blue → purple. Negative goes the other way.
+        let mut primary = [0.0f32; 3];
+        primary[i] = 1.0;
+        primary[(i + 1) % 3] = (hue / 100.0).max(0.0) * 0.3;
+        primary[(i + 2) % 3] = (-hue / 100.0).max(0.0) * 0.3;
+        let total: f32 = primary.iter().sum();
+        let strength = 1.0 + 0.5 * saturation / 100.0;
+        for (row, value) in primary.iter().enumerate() {
+            m[row][i] = 1.0 / 3.0 + (value / total - 1.0 / 3.0) * strength;
+        }
+    }
+    for row in &mut m {
+        let total: f32 = row.iter().sum();
+        row.iter_mut().for_each(|v| *v /= total);
+    }
+    Some(m)
 }
 
 #[inline(always)]
@@ -481,7 +534,13 @@ impl<'a> Prepared<'a> {
 
         let curves = (!a.curve.is_identity()).then(|| {
             let straight: Vec<f32> = (0..CURVE_STEPS).map(|i| i as f32 / (CURVE_STEPS - 1) as f32).collect();
-            let master = curve_table(&a.curve.rgb, CURVE_STEPS).unwrap_or_else(|| straight.clone());
+            // The parametric sliders bend the curve first, then the point curve is applied.
+            let master = match (parametric_table(&a.curve.parametric, CURVE_STEPS), curve_table(&a.curve.rgb, CURVE_STEPS)) {
+                (Some(p), Some(points)) => p.iter().map(|&v| read_table(&points, v)).collect(),
+                (Some(p), None) => p,
+                (None, Some(points)) => points,
+                (None, None) => straight.clone(),
+            };
             [&a.curve.red, &a.curve.green, &a.curve.blue].map(|ch| match curve_table(ch, CURVE_STEPS) {
                 // Master curve first, then the channel's own curve.
                 Some(t) => master.iter().map(|&v| read_table(&t, v)).collect(),
@@ -662,6 +721,47 @@ fn bilinear(img: &LinearImage, sx: f32, sy: f32) -> [f32; 3] {
     })
 }
 
+/// Reads the photo for one output pixel: applies the view's mapping (crop,
+/// zoom) and the lens corrections.
+struct Fetch<'a> {
+    img: &'a LinearImage,
+    to_source: Option<Affine>,
+    lens: Option<Lens>,
+    inv_w: f32,
+    inv_h: f32,
+}
+
+impl Fetch<'_> {
+    /// The photo's colour for output pixel `(x, y)` and where in the photo it
+    /// came from (0…1). `y` may lie above or below the output; the detail
+    /// filters need a few such rows.
+    #[inline]
+    fn at(&self, x: usize, y: isize) -> ([f32; 3], f32, f32) {
+        let (sx, sy) = match &self.to_source {
+            None if self.lens.is_none() => {
+                let row = y.clamp(0, self.img.height as isize - 1) as usize;
+                return (self.img.pixels[row * self.img.width + x], (x as f32 + 0.5) * self.inv_w, (row as f32 + 0.5) * self.inv_h);
+            }
+            None => (x as f32 + 0.5, y as f32 + 0.5),
+            Some(t) => {
+                let (sx, sy) = t.apply(x as f64 + 0.5, y as f64 + 0.5);
+                (sx as f32, sy as f32)
+            }
+        };
+        let Some(lens) = &self.lens else {
+            return (bilinear(self.img, sx, sy), sx * self.inv_w, sy * self.inv_h);
+        };
+        let ([g, r, b], gain) = lens.map(sx, sy);
+        let mut p = bilinear(self.img, g.0, g.1);
+        if lens.splits_colours() {
+            // Red and blue are read from slightly different places to line them up with green.
+            p[0] = bilinear(self.img, r.0, r.1)[0];
+            p[2] = bilinear(self.img, b.0, b.1)[2];
+        }
+        ([p[0] * gain, p[1] * gain, p[2] * gain], g.0 * self.inv_w, g.1 * self.inv_h)
+    }
+}
+
 /// Render `out_w × out_h` display-ready sRGB pixels.
 pub fn render(scene: &Scene, adj: &Adjustments, view: &View, out_w: usize, out_h: usize) -> RenderedImage {
     let adj = adj.clone().sanitized();
@@ -670,36 +770,86 @@ pub fn render(scene: &Scene, adj: &Adjustments, view: &View, out_w: usize, out_h
         assert_eq!((out_w, out_h), (img.width, img.height), "a view without a mapping renders the image itself");
     }
     let prep = Prepared::new(scene, &adj, view);
-    let (sw, sh) = (img.width as f32, img.height as f32);
+    let fetch = Fetch {
+        img,
+        to_source: view.to_source,
+        lens: Lens::new(&adj, scene.look.chromatic, img.width, img.height),
+        inv_w: 1.0 / img.width as f32,
+        inv_h: 1.0 / img.height as f32,
+    };
+    let detail = Detail::new(&adj, view.px_scale);
     let mut rgb = vec![0u8; out_w * out_h * 3];
-    let (inv_sw, inv_sh) = (1.0 / sw, 1.0 / sh);
+    let width = out_w.max(1);
     let crop = &view.to_crop;
-    rgb.par_chunks_mut(3 * out_w.max(1)).enumerate().for_each(|(y, out_row)| {
-        let yc = y as f64 + 0.5;
-        // Positions at the first pixel of the row; each step right adds a constant.
-        let (nx0, ny0) = crop.apply(0.5, yc);
-        let (nx0, ny0, nxs, nys) = (nx0 as f32, ny0 as f32, crop.a as f32, crop.d as f32);
-        let src_row = view.to_source.as_ref().map(|t| {
-            let (sx0, sy0) = t.apply(0.5, yc);
-            (sx0, sy0, t.a, t.d)
+    // Position in the finished picture at the first pixel of a row, and the step per pixel.
+    let crop_row = |y: usize| {
+        let (nx0, ny0) = crop.apply(0.5, y as f64 + 0.5);
+        (nx0 as f32, ny0 as f32, crop.a as f32, crop.d as f32)
+    };
+
+    let Some(detail) = detail else {
+        rgb.par_chunks_mut(3 * width).enumerate().for_each(|(y, out_row)| {
+            let (nx0, ny0, nxs, nys) = crop_row(y);
+            for (x, out) in out_row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                let (px, u, v) = fetch.at(x, y as isize);
+                *out = prep.shade(px, u, v, nx0 + nxs * x as f32, ny0 + nys * x as f32, view.crop_px);
+            }
         });
-        let v_row = yc as f32 * inv_sh;
-        for (x, out) in out_row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-            let xf = x as f32;
-            let (px, u, v) = match src_row {
-                None => (img.pixels[y * img.width + x], (xf + 0.5) * inv_sw, v_row),
-                Some((sx0, sy0, sxs, sys)) => {
-                    let (sx, sy) = ((sx0 + sxs * x as f64) as f32, (sy0 + sys * x as f64) as f32);
-                    (bilinear(img, sx, sy), sx * inv_sw, sy * inv_sh)
+        return RenderedImage { width: out_w, height: out_h, rgb };
+    };
+
+    // The detail filters need neighbouring pixels, so the picture is worked on
+    // in horizontal strips, each read with a few extra rows above and below.
+    let strip_rows = (out_h / (rayon::current_num_threads() * 2).max(1)).clamp(16, 64);
+    let margin = detail.margin;
+    rgb.par_chunks_mut(3 * width * strip_rows).enumerate().for_each(|(index, out_strip)| {
+        let y0 = index * strip_rows;
+        let rows = out_strip.len() / (3 * width);
+        let strip_h = rows + 2 * margin;
+        let mut strip = Vec::with_capacity(width * strip_h);
+        let mut places = Vec::with_capacity(width * rows);
+        for sy in 0..strip_h {
+            let y = y0 as isize + sy as isize - margin as isize;
+            let inside = sy >= margin && sy < margin + rows;
+            for x in 0..out_w {
+                let (px, u, v) = fetch.at(x, y);
+                strip.push(px);
+                if inside {
+                    places.push((u, v));
                 }
-            };
-            *out = prep.shade(px, u, v, nx0 + nxs * xf, ny0 + nys * xf, view.crop_px);
+            }
+        }
+        detail.apply(&mut strip, width, strip_h);
+        for (row, out_row) in out_strip.chunks_mut(3 * width).enumerate() {
+            let (nx0, ny0, nxs, nys) = crop_row(y0 + row);
+            for (x, out) in out_row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                let (u, v) = places[row * width + x];
+                let px = strip[(margin + row) * width + x];
+                *out = prep.shade(px, u, v, nx0 + nxs * x as f32, ny0 + nys * x as f32, view.crop_px);
+            }
         }
     });
     RenderedImage { width: out_w, height: out_h, rgb }
 }
 
-/// Render a whole image with no crop and no look-up table.
+/// Render a downscaled copy of the photo the way the app's preview does:
+/// the whole frame, with everything scaled as it will be in the full-size
+/// picture (`full_size` is the photo's real size in pixels).
+pub fn render_preview(
+    preview: &LinearImage,
+    adj: &Adjustments,
+    look: &Look,
+    lut: Option<&Lut3D>,
+    full_size: (usize, usize),
+) -> RenderedImage {
+    let scene = Scene { image: preview, look, lut };
+    let view = View::preview(&adj.crop, preview.width, preview.height, full_size.0, full_size.1);
+    render(&scene, adj, &view, preview.width, preview.height)
+}
+
+/// Render a whole image at full size with no crop and no look-up table.
+/// For a downscaled copy use [`render_preview`], or sharpening and grain
+/// would be sized for the wrong number of pixels.
 pub fn render_srgb8(img: &LinearImage, adj: &Adjustments, look: &Look) -> RenderedImage {
     let mut adj = adj.clone();
     adj.crop = Crop::default();
@@ -935,10 +1085,13 @@ mod tests {
         let img = LinearImage::new(4, 2, (0..8).map(|i| [i as f32 / 10.0; 3]).collect());
         let look = Look::neutral();
         let scene = Scene { image: &img, look: &look, lut: None };
-        let plain = render_srgb8(&img, &Adjustments::default(), &look);
+        // No sharpening here: this test is about pixels arriving unchanged.
+        let mut unsharpened = Adjustments::default();
+        unsharpened.sharpen.amount = 0.0;
+        let plain = render_srgb8(&img, &unsharpened, &look);
         let level = |x: usize, y: usize| plain.rgb[(y * 4 + x) * 3];
 
-        let mut adj = Adjustments::default();
+        let mut adj = unsharpened.clone();
         adj.crop.rotate_cw();
         let (view, ow, oh) = View::export(&adj.crop, 4, 2);
         assert_eq!((ow, oh), (2, 4));
@@ -947,11 +1100,37 @@ mod tests {
         assert_eq!(turned.rgb[3], level(0, 0));
         assert_eq!(turned.rgb[0], level(0, 1));
 
-        let adj = Adjustments { crop: Crop { cx: 0.75, w: 0.5, ..Crop::default() }, ..Default::default() }; // right half
+        let adj = Adjustments { crop: Crop { cx: 0.75, w: 0.5, ..Crop::default() }, ..unsharpened }; // right half
         let (view, ow, oh) = View::export(&adj.crop, 4, 2);
         assert_eq!((ow, oh), (2, 2));
         let cropped = render(&scene, &adj, &view, ow, oh);
         assert_eq!([cropped.rgb[0], cropped.rgb[3], cropped.rgb[6], cropped.rgb[9]], [level(2, 0), level(3, 0), level(2, 1), level(3, 1)]);
+    }
+
+    #[test]
+    fn a_zoomed_in_region_matches_the_same_part_of_the_export() {
+        // A varied 120 × 80 photo, cropped, with a vignette and the default sharpening.
+        let px = (0..120 * 80).map(|i| [0.2 + 0.3 * ((i % 120) as f32 * 0.4).sin().abs(), 0.3, 0.1 + (i / 120) as f32 / 200.0]).collect();
+        let img = LinearImage::new(120, 80, px);
+        let look = Look::neutral();
+        let scene = Scene { image: &img, look: &look, lut: None };
+        let mut adj = Adjustments { crop: Crop { cx: 0.5, cy: 0.5, w: 0.8, h: 0.75, ..Crop::default() }, ..Default::default() };
+        adj.vignette.amount = -50.0;
+        let (view, ow, oh) = View::export(&adj.crop, 120, 80);
+        let export = render(&scene, &adj, &view, ow, oh);
+        assert_eq!((ow, oh), (96, 60));
+        // The middle half of the finished picture, at one output pixel per photo pixel.
+        let region = View::region(&adj.crop, 120, 80, [0.25, 0.25, 0.75, 0.75], 48, 30);
+        assert!((region.px_scale - 1.0).abs() < 1e-4);
+        let part = render(&scene, &adj, &region, 48, 30);
+        // Away from the region's own border (where the filters see fewer neighbours) the pixels are the same.
+        for y in 6..24 {
+            for x in 6..42 {
+                let a = &part.rgb[(y * 48 + x) * 3..][..3];
+                let b = &export.rgb[((y + 15) * 96 + x + 24) * 3..][..3];
+                assert!((0..3).all(|c| (a[c] as i32 - b[c] as i32).abs() <= 1), "({x},{y}): {a:?} vs {b:?}");
+            }
+        }
     }
 
     #[test]

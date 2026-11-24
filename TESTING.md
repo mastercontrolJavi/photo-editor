@@ -11,7 +11,8 @@ First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11
 | Area | Status |
 |---|---|
 | Build and launch on Windows | **Passed.** Release build, launched 5 times, opened files, closed cleanly. |
-| Pipeline: decode, adjust, preview, export, edit files | **Passed.** 83 automated tests (see "Lightroom-style controls" below for what the new ones cover). |
+| Pipeline: decode, adjust, preview, export, edit files | **Passed.** 103 automated tests (see the two sections below for what the new ones cover). |
+| Detail, optics, zoom, Auto (added 2026-11-23, second batch) | **Built and tested by program.** Checked by eye at 100 % on real photos. Not yet used by a person. |
 | Tone, colour, effects, crop, presets (added 2026-11-23) | **Built and tested by program.** Checked by eye on contact sheets of real photos. Not yet used by a person. |
 | Preview vs export agreement | **Passed.** Within the tolerances documented below. |
 | Real iPhone ProRAW files (iPhone 15 Pro, 7 files) | **Opens, exports, orientation and source-safety passed.** Default rendering now matches Apple's within 0.3 EV on all 7 (fixed 2026-11-23, see below). |
@@ -19,6 +20,60 @@ First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11
 | Clicking through the app by hand | **Pending.** Javier to run the checklist at the end of this file. |
 
 The automated tests use generic DNGs built by the test code. Real-file results are in the sections below.
+
+## Detail, optics and zoom (2026-11-23, second batch)
+
+Added: Texture, Sharpening (radius, detail, masking), Noise Reduction (luminance, colour), Defringe, Remove chromatic aberration, Distortion, Lens vignetting, the parametric curve, Calibration (through presets), Auto, and zoom to 100 % with panning.
+
+### What was verified
+
+| Check | Result |
+|---|---|
+| Automated tests | **103 passed, 0 failed** (84 pipeline unit, 9 end-to-end, 10 app). |
+| Sharpening | Tested: steepens an edge, leaves flat areas and grey balance alone, and Masking keeps it off fine grain while still sharpening edges. |
+| Noise reduction | Tested: luminance NR halves noise in flat areas and keeps a hard edge; colour NR removes colour speckle without changing brightness or the area's real colour. |
+| Texture, Defringe | Tested: Texture changes medium-sized detail in both directions; Defringe removes purple only beside strong edges and leaves a purple object elsewhere alone. |
+| Chromatic aberration | Tested on a synthetic image with a known red/blue misalignment: the measurement finds its size and direction within 0.0002, the correction lines the colours up, and a clean image measures as exactly zero. |
+| Distortion, lens vignetting | Tested: the centre never moves, no pixel is ever read from outside the photo at any setting, and vignetting changes only the corners. |
+| Zoomed view | Tested: a zoomed-in region rendered from the full photo matches the same part of the full export to within 1 level. |
+| Parametric curve, Auto, Calibration | Tested: each parametric slider bends only its region and the curve never dips; Auto brightens dark photos, darkens bright ones, and leaves a well-exposed one and all non-Light settings alone. |
+| Preset import | The hand-written Lightroom preset now imports with nothing reported as unsupported (Texture, Sharpening and Calibration map across). |
+| Default rendering | `compare_apple` gives the same numbers as before, so default sharpening does not change brightness, contrast or colour. |
+| By eye at 100 % | A contact sheet of 12 detail settings on IMG_7292 shows the expected effect for each and no artefacts at default settings. Texture ±100 gave halos and was toned down. |
+
+### Fine detail compared with Apple's rendering
+
+`crop_compare` measures fine detail (average difference between neighbouring pixels) in a 100 % crop.
+
+| Photo | No sharpening | Sharpening 40 (default) | Sharpening 80 | Apple's |
+|---|---|---|---|---|
+| IMG_7292 (12 MP) | 6.2 | 8.6 | 10.4 | 9.9 |
+| IMG_7235 (48 MP) | 1.4 | 1.5 | 1.7 | 2.4 |
+| IMG_7303 (48 MP) | 0.6 | 0.7 | 0.8 | 1.0 |
+
+* On the 12 MP photo, sharpening between 40 and 80 matches Apple's level of detail.
+* On the 48 MP photos Apple's rendering is clearly crisper than ours even at 80. The 48 MP RAW data is softer per pixel, and Apple sharpens it harder. Raising Sharpening and Radius closes some of the gap.
+
+### What the lens corrections do for these photos
+
+None of the 7 ProRAW files carries lens-correction data (`pe probe` shows no OpcodeList tags). The phone corrects them before saving. The chromatic-aberration measurement is exactly zero on all 7 (shown by `pe probe`), which is the expected result for corrected files. So on these photos "Remove chromatic aberration" does nothing, and the app says so.
+
+### Speed (IMG_7303, 48 MP)
+
+| | Time |
+|---|---|
+| Open | about 0.9 s (60–100 ms more than before, for the chromatic-aberration measurement) |
+| Preview, light edit, 2560 px | 15 ms |
+| Preview, heavy edit, 2560 px | about 120 ms |
+| Zoomed to 100 %, default sharpening, 1680 × 1239 visible | 34 ms |
+| Full-size export render, heavy edit plus sharpening | 1.4 s, plus 0.85 s to encode |
+
+### Not verified
+
+* **Nobody has used these controls by hand yet.** Zooming, panning and the new sliders were checked by screenshot and by program.
+* **The filters are not tuned against Lightroom.** Sharpening 40 here is not guaranteed to look like Sharpening 40 there.
+* **Chromatic aberration removal has only been proven on a synthetic image.** No uncorrected real photo was available.
+* **Noise reduction has not been tried on a genuinely noisy photo** (a dark indoor or night shot).
 
 ## Lightroom-style controls (2026-11-23)
 
@@ -30,7 +85,7 @@ Added: Contrast, Highlights, Shadows, Whites, Blacks, point curves, Vibrance, Sa
 
 | Check | Result |
 |---|---|
-| Automated tests | **83 passed, 0 failed** (64 pipeline unit, 9 end-to-end, 10 app). |
+| Automated tests | 83 passed at the time (64 pipeline unit, 9 end-to-end, 10 app). Now 103 with the second batch. |
 | Each slider does what its name says | Tested: Contrast pivots on middle grey; Shadows / Highlights / Whites / Blacks act on their own range and never reverse the order of tones; Highlights recovers detail above sensor white; Saturation −100 and B&W give pure grey; the Color Mixer changes only its own colour; curves pass through their points without overshoot; Color Grading tints only the chosen range; Vignette darkens corners and not the centre; Grain keeps the average brightness. |
 | Clarity and Dehaze | Tested on synthetic stripes: both add local contrast when positive and remove it when negative. The edge-aware helper map keeps a 5-stop edge without a halo. |
 | Crop geometry | Tested: quarter turns and flips compose correctly, a crop follows the picture through a turn, straightening keeps the crop inside the photo, aspect presets give the largest crop of that shape. |
@@ -136,7 +191,7 @@ The side-by-side images, exports and screenshots are in `Downloads\ProRAW test r
 
 ## Automated tests
 
-Run: `cargo test --workspace --release -- --nocapture`. Result: **83 passed, 0 failed.**
+Run: `cargo test --workspace --release -- --nocapture`. Result: **103 passed, 0 failed.**
 
 What the tests cover:
 
@@ -249,7 +304,7 @@ Known effects on ProRAW:
 2. **Your reference edits:** compare a portrait and your own edits of these shots against our exports, for skin tone, highlights and shadows. No portrait was in this test set.
 3. ~~Speed on real files~~: done (see above).
 4. **Hands-on check in the app:**
-   0. New on 2026-11-23: try the Edit sliders, the curve, the Crop tab (drag corners, straighten, rotate), click a few starter presets, and import a downloaded Lightroom preset.
+   0. New on 2026-11-23: try the Edit sliders, the curve, the Crop tab (drag corners, straighten, rotate), click a few starter presets, and import a downloaded Lightroom preset. Zoom to 100 % (press Z), drag to pan, and try Sharpening and Noise Reduction there. Try Auto.
    1. Drag each slider. The preview should follow smoothly.
    2. Press `\` and the Before/After buttons.
    3. Ctrl+S, close the app, reopen the photo. The edit should come back.
@@ -263,10 +318,10 @@ Known effects on ProRAW:
 1. ~~**ProRAW rendering fidelity.**~~ Done on 2026-11-23: every mid-tone gap is now within 0.3 EV of Apple's. Still open: ProfileGainTableMap2 for newer files, and semantic masks.
 2. ~~**Basic tone controls.**~~ Done on 2026-11-23, with curves, Color Mixer, Color Grading, Clarity, Dehaze, Vignette and Grain.
 3. ~~**Crop and rotate.**~~ Done on 2026-11-23.
-4. **Detail and optics.** Texture, Sharpening, Noise Reduction, lens corrections from the DNG, chromatic aberration, Defringe. These need neighbourhood filters at full resolution.
-5. **Closer preset matching.** Calibration (colour primaries) and the parametric tone curve, which many downloaded presets use. Lightroom colour profiles / look tables where the preset embeds them.
+4. ~~**Detail and optics.**~~ Done on 2026-11-23: Texture, Sharpening, Noise Reduction, Defringe, chromatic aberration, Distortion, lens vignetting. Still open: lens-correction data stored in non-iPhone DNGs (no sample file to test with).
+5. ~~**Closer preset matching.**~~ Calibration and the parametric curve are done. Still open: Lightroom colour profiles / look tables embedded in presets.
 6. **Faster tone step.** Replace the per-pixel logarithms with look-up tables, aiming for a heavy edit under 50 ms at 2560 px.
-7. **Geometry, Point Color, Auto, zoom to 100 %.**
+7. **Geometry (perspective), Point Color.** Auto and zoom to 100 % are done.
 8. **Folder browsing with thumbnails.** Use the DNG's embedded preview for speed.
 9. **Copy/paste edits and batch JPEG export.**
 10. **TIFF and HEIC input.** Only after testing real iPhone samples. HEIC decoding needs a codec choice.

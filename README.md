@@ -13,6 +13,7 @@ You open a DNG, edit it with Lightroom-style controls, crop it, and export a ful
 | Edit | The **Edit** tab. Double-click any slider to reset it. |
 | Crop | The **Crop** tab: drag the corners or edges, pick a shape, straighten, rotate, flip. Press Enter when done. |
 | Presets | The **Presets** tab: click one to apply it. |
+| Zoom | **100%** / **Fit** at the top, press `Z`, double-click the photo, or use the mouse wheel. Drag to move around when zoomed in. |
 | Undo / redo | Ctrl+Z / Ctrl+Y, or the buttons at the top |
 | Compare | **Before / After** buttons, or press `\` |
 | Save the edit | **Save edit** (Ctrl+S). It writes `IMG_0001.DNG.edit.json` next to the photo. |
@@ -22,14 +23,23 @@ You open a DNG, edit it with Lightroom-style controls, crop it, and export a ful
 
 | Section | Controls |
 |---|---|
-| Light | Exposure, Contrast, Highlights, Shadows, Whites, Blacks, point Curve (RGB, Red, Green, Blue) |
+| Top row | Auto (sets the Light sliders from the photo's brightness), B&W, Reset all |
+| Light | Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Curve (point curves for RGB, Red, Green, Blue, plus the four parametric sliders) |
 | Color | Temp, Tint, Vibrance, Saturation, B&W, Color Mixer (hue / saturation / luminance for 8 colours), B&W Mixer, Color Grading (shadows, midtones, highlights, global, blending, balance) |
-| Effects | Clarity, Dehaze, Vignette (midpoint, feather, roundness), Grain (size, roughness) |
+| Effects | Texture, Clarity, Dehaze, Vignette (midpoint, feather, roundness), Grain (size, roughness) |
+| Detail | Sharpening (radius, detail, masking), Noise Reduction (luminance, colour) |
+| Optics | Remove chromatic aberration, Distortion, Lens vignetting, Defringe (purple, green) |
 | Look | A `.cube` LUT with an Amount slider, once one is applied from Presets |
 
 The slider names and ranges follow Lightroom's, but the maths behind them is this app's own. The same number gives a similar result, not an identical one.
 
-**Not in this version yet:** Texture, Sharpening, Noise Reduction, lens corrections, Defringe, Geometry, Point Color, Auto, masking and healing.
+* **Sharpening starts at 40**, as in Lightroom. RAW data is slightly soft until sharpened. Set it to 0 for none.
+* **Sharpening and noise reduction only show properly at 100%.** In the fit-to-window view each screen pixel covers several photo pixels, so they fade out, exactly as they do when the exported photo is viewed small.
+* **Lens corrections:** iPhone ProRAW files are already corrected by the phone, so there is nothing to switch on. The Optics sliders are for touch-ups. "Remove chromatic aberration" measures the colour misalignment in each photo and does nothing if there is none.
+* **Auto** is a simple rule based on the photo's brightness. It is not Lightroom's Auto, which uses a trained model.
+* **Calibration** (the camera's colour primaries) has no sliders, but imported presets that use it are applied.
+
+**Not in this version yet:** Geometry (perspective), Point Color, masking and healing.
 **Not planned as-is:** Lightroom's AI features (Denoise, Lens Blur, Adaptive presets) need trained models that this app doesn't have.
 
 ### Presets and LUTs
@@ -37,7 +47,7 @@ The slider names and ranges follow Lightroom's, but the maths behind them is thi
 * The app ships with 12 starter presets (9 colour, 3 black & white).
 * **Import presets…** reads Lightroom presets (`.xmp`, and the older `.lrtemplate`) and `.cube` LUTs. You can pick several files at once.
 * An imported preset applies every setting this app has. Anything it can't apply is listed when you import, and the preset is marked with `*`.
-  The most common gaps are colour profiles / look tables, Calibration, Texture and Sharpening. Presets built mainly on those will look different from Lightroom.
+  The most common gap is a colour profile or look table embedded in the preset. Presets built mainly on one will look different from Lightroom.
 * Presets never change the crop. A Lightroom preset's white balance in Kelvin is skipped, so the photo keeps its as-shot balance.
 * **Save the current edit** stores your own preset under "Yours".
 * Imported and saved presets live in `%APPDATA%\Photo Editor\presets` (the Info tab has a button to open it).
@@ -98,6 +108,9 @@ Inside `crates/pipeline/src`:
 | `adjust.rs` | Every slider value of an edit, and how it is saved |
 | `render.rs` | Turns the photo plus an edit into pixels (preview and export) |
 | `local.rs` | Small helper maps so Shadows, Highlights, Clarity and Dehaze can look at a pixel's surroundings |
+| `detail.rs` | Texture, Sharpening, Noise Reduction, Defringe |
+| `lens.rs` | Distortion, lens vignetting, measuring and removing chromatic aberration |
+| `auto.rs` | The Auto button's rule |
 | `geometry.rs` | Crop, straighten, rotate, flip |
 | `preset.rs` | Starter presets, Lightroom preset import, the presets folder |
 | `lut.rs` | `.cube` look-up tables |
@@ -110,6 +123,7 @@ Inside `crates/pipeline/src`:
 * **One render function** is used for both the preview and the export.
   * The preview is the photo shrunk to 2560, 1600 and 1000 px on its long edge. The app renders the smallest one that fills the window, and one size smaller while you are dragging a slider.
   * The crop is applied when the preview is drawn, so cropping never re-renders the photo.
+  * Zoomed in past the largest preview, only the visible part is rendered, from the full-size photo.
   * The export renders again from the full-size image, cropped.
 * **Export:** baseline JPEG at quality 92, with an embedded sRGB ICC profile.
   Pixels are written upright, so the file needs no orientation tag.

@@ -8,6 +8,9 @@ use crate::theme;
 /// Start with every group open (set by the `--expand` option, for screenshots).
 pub static EXPAND_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Open only these sections at start-up (set by the `--only` option, for screenshots).
+pub static ONLY_SECTIONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
 /// What to draw under a slider to show which way it pushes.
 pub enum Track {
     None,
@@ -139,6 +142,7 @@ fn strip(ui: &mut egui::Ui, width: f32, colours: &[Color32]) {
 
 /// A collapsible top-level section ("Light", "Color", …).
 pub fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
+    let open = ONLY_SECTIONS.get().map(|only| only.iter().any(|name| name.eq_ignore_ascii_case(title))).unwrap_or(open);
     ui.add_space(2.0);
     egui::CollapsingHeader::new(RichText::new(title).strong().size(14.0))
         .id_salt(("section", title))

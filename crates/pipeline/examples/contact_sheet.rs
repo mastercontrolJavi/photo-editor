@@ -1,10 +1,12 @@
 //! Render one photo many ways side by side, to check sliders and presets by eye.
 //!
 //! ```text
-//! cargo run --release -p pipeline --example contact_sheet -- <presets|sliders> <out.jpg> <photo.dng>
+//! cargo run --release -p pipeline --example contact_sheet -- <presets|sliders|optics|detail> <out.jpg> <photo.dng> [x y]
 //! ```
 //!
 //! Cells are filled left to right, top to bottom, in the order printed.
+//! `detail` shows a 100 % crop around the point `x y` (0…1, default the centre);
+//! the other modes show the whole photo.
 
 use std::path::Path;
 
@@ -15,29 +17,47 @@ const COLUMNS: usize = 4;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [mode, out, photo] = args.as_slice() else {
-        eprintln!("usage: contact_sheet <presets|sliders> <out.jpg> <photo.dng>");
+    let [mode, out, photo, ..] = args.as_slice() else {
+        eprintln!("usage: contact_sheet <presets|sliders|optics|detail> <out.jpg> <photo.dng> [x y]");
         std::process::exit(2);
     };
     let cells: Vec<(String, Adjustments)> = match mode.as_str() {
         "presets" => std::iter::once(("Original".to_string(), Adjustments::default()))
             .chain(pipeline::preset::builtin().into_iter().map(|p| (p.name.clone(), p.apply(&Adjustments::default()))))
             .collect(),
+        "optics" => optics_cells(),
+        "detail" => detail_cells(),
         _ => slider_cells(),
     };
+    let spot: Vec<f64> = args[3..].iter().filter_map(|v| v.parse().ok()).collect();
+    let spot = (spot.first().copied().unwrap_or(0.5), spot.get(1).copied().unwrap_or(0.5));
     let decoded = decode_file(Path::new(photo)).expect("decode");
     let small = decoded.image.downscale_to_fit(CELL_EDGE);
     let look = decoded.info.look();
-    let (w, h) = (small.width, small.height);
+    let (mut w, mut h) = (small.width, small.height);
+    if mode == "detail" {
+        (w, h) = (CELL_EDGE, CELL_EDGE * 3 / 4);
+    }
+    let (fw, fh) = (decoded.image.width, decoded.image.height);
+    // In detail mode: the part of the photo shown, one output pixel per photo pixel.
+    let part = {
+        let (pw, ph) = (w as f64 / fw as f64, h as f64 / fh as f64);
+        let (u0, v0) = ((spot.0 - pw / 2.0).clamp(0.0, 1.0 - pw), (spot.1 - ph / 2.0).clamp(0.0, 1.0 - ph));
+        [u0, v0, u0 + pw, v0 + ph]
+    };
     let gap = 6;
     let rows = cells.len().div_ceil(COLUMNS);
     let (sheet_w, sheet_h) = (COLUMNS * (w + gap) + gap, rows * (h + gap) + gap);
     let mut sheet = vec![40u8; sheet_w * sheet_h * 3];
     for (i, (label, adj)) in cells.iter().enumerate() {
         println!("{:>2}  row {} col {}  {label}", i + 1, i / COLUMNS + 1, i % COLUMNS + 1);
-        let scene = Scene { image: &small, look: &look, lut: None };
-        let view = View::preview(&adj.crop, w, h, decoded.image.width, decoded.image.height);
-        let r = render(&scene, adj, &view, w, h);
+        let r = if mode == "detail" {
+            let scene = Scene { image: &decoded.image, look: &look, lut: None };
+            render(&scene, adj, &View::region(&adj.crop, fw, fh, part, w, h), w, h)
+        } else {
+            let scene = Scene { image: &small, look: &look, lut: None };
+            render(&scene, adj, &View::preview(&adj.crop, w, h, fw, fh), w, h)
+        };
         let (ox, oy) = (gap + (i % COLUMNS) * (w + gap), gap + (i / COLUMNS) * (h + gap));
         for y in 0..h {
             let dst = ((oy + y) * sheet_w + ox) * 3;
@@ -48,6 +68,63 @@ fn main() {
     std::fs::write(out, jpeg).expect("write sheet");
     println!("Wrote {out} ({sheet_w} x {sheet_h})");
     let _ = LinearImage::new(0, 0, vec![]);
+}
+
+fn optics_cells() -> Vec<(String, Adjustments)> {
+    let with = |f: fn(&mut Adjustments)| {
+        let mut a = Adjustments::default();
+        f(&mut a);
+        a
+    };
+    vec![
+        ("Original".into(), Adjustments::default()),
+        ("Distortion +100".into(), with(|a| a.optics.distortion = 100.0)),
+        ("Distortion -100".into(), with(|a| a.optics.distortion = -100.0)),
+        ("Lens vignetting +100".into(), with(|a| a.optics.vignetting = 100.0)),
+        ("Lens vignetting -100".into(), with(|a| a.optics.vignetting = -100.0)),
+        ("Texture +100".into(), with(|a| a.texture = 100.0)),
+        ("Texture -100".into(), with(|a| a.texture = -100.0)),
+        ("Calibration: blue hue -60, blue sat +40".into(), with(|a| {
+            a.calibration.blue_hue = -60.0;
+            a.calibration.blue_saturation = 40.0;
+        })),
+    ]
+}
+
+fn detail_cells() -> Vec<(String, Adjustments)> {
+    let with = |f: fn(&mut Adjustments)| {
+        let mut a = Adjustments::default();
+        a.sharpen.amount = 0.0;
+        f(&mut a);
+        a
+    };
+    vec![
+        ("No sharpening".into(), with(|_| {})),
+        ("Sharpening 40 (default)".into(), with(|a| a.sharpen.amount = 40.0)),
+        ("Sharpening 150".into(), with(|a| a.sharpen.amount = 150.0)),
+        ("Sharpening 100, radius 2.5".into(), with(|a| {
+            a.sharpen.amount = 100.0;
+            a.sharpen.radius = 2.5;
+        })),
+        ("Sharpening 150, masking 80".into(), with(|a| {
+            a.sharpen.amount = 150.0;
+            a.sharpen.masking = 80.0;
+        })),
+        ("Luminance noise 80".into(), with(|a| a.noise.luminance = 80.0)),
+        ("Colour noise 100".into(), with(|a| a.noise.color = 100.0)),
+        ("Texture +100".into(), with(|a| a.texture = 100.0)),
+        ("Texture -100".into(), with(|a| a.texture = -100.0)),
+        ("Exposure +2, no noise reduction".into(), with(|a| a.exposure = 2.0)),
+        ("Exposure +2, luminance 60, colour 60".into(), with(|a| {
+            a.exposure = 2.0;
+            a.noise.luminance = 60.0;
+            a.noise.color = 60.0;
+        })),
+        ("Defringe purple 20, green 20".into(), with(|a| {
+            a.optics.defringe_purple = 20.0;
+            a.optics.defringe_green = 20.0;
+        })),
+    ]
 }
 
 fn slider_cells() -> Vec<(String, Adjustments)> {
