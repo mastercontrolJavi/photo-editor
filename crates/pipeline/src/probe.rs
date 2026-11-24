@@ -169,7 +169,7 @@ pub fn report(path: &std::path::Path) -> String {
             let t = &i.tags;
             let _ = writeln!(s, "Decode: OK in {} ms", started.elapsed().as_millis());
             let _ = writeln!(s, "Camera: {} {}", i.make, i.model);
-            let _ = writeln!(s, "Kind: {:?}", i.kind);
+            let _ = writeln!(s, "Kind: {:?} ({}{})", i.kind, i.format, if i.bits > 0 { format!(", {}-bit", i.bits) } else { String::new() });
             let _ = writeln!(s, "Output size (upright): {} × {}", i.width, i.height);
             let _ = writeln!(s, "Orientation code applied: {}", i.orientation);
             let _ = writeln!(s, "DNG version: {:?}", t.dng_version);

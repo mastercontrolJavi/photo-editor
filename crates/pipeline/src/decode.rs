@@ -32,6 +32,14 @@ pub enum SourceKind {
     LinearRaw,
     /// Classic Bayer-mosaic RAW (most cameras, DJI Pocket 3 DNGs).
     BayerCfa,
+    /// An already-processed photo: JPEG, PNG or HEIC.
+    Rendered,
+}
+
+impl SourceKind {
+    pub fn is_raw(self) -> bool {
+        self != SourceKind::Rendered
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +47,10 @@ pub struct SourceInfo {
     pub make: String,
     pub model: String,
     pub kind: SourceKind,
+    /// File type as shown to the user: "RAW", "JPEG", "PNG" or "HEIC".
+    pub format: String,
+    /// Bits per colour for an already-processed photo (0 for RAW).
+    pub bits: u8,
     /// Final, upright size in pixels (after crop and orientation).
     pub width: usize,
     pub height: usize,
@@ -62,6 +74,17 @@ pub struct SourceInfo {
 }
 
 impl SourceInfo {
+    /// The edit a photo of this kind starts with, and returns to on "Reset
+    /// all". RAW photos get default sharpening; photos a camera has already
+    /// processed are sharp already, so they get none.
+    pub fn starting_adjustments(&self) -> crate::Adjustments {
+        let mut a = crate::Adjustments::default();
+        if !self.kind.is_raw() {
+            a.sharpen.amount = 0.0;
+        }
+        a
+    }
+
     /// Everything the renderer needs from the file.
     pub fn look(&self) -> Look {
         Look {
@@ -89,10 +112,15 @@ pub fn decode_file(path: &Path) -> Result<DecodedImage> {
 
 /// Decode from memory. The source file is only ever read, never opened for writing.
 pub fn decode_bytes(bytes: Vec<u8>) -> Result<DecodedImage> {
-    if let Some(kind) = non_raw_kind(&bytes) {
-        return Err(PipelineError::Unsupported {
-            detail: format!("this is a {kind}, not a RAW file. The editor opens RAW DNG files, such as iPhone ProRAW."),
-        });
+    // The file type is worked out from the file's contents, not its name.
+    match non_raw_kind(&bytes) {
+        Some(NonRaw::Photo(format)) => return crate::rendered::decode(format, &bytes),
+        Some(NonRaw::Other(what)) => {
+            return Err(PipelineError::Unsupported {
+                detail: format!("this is {what}. The editor opens RAW (DNG), JPEG, PNG and HEIC photos."),
+            });
+        }
+        None => {}
     }
     let src = RawSource::new_from_shared_vec(Arc::new(bytes));
     // rawler has `todo!()`/`panic!` paths for unusual files; turn those into
@@ -110,21 +138,34 @@ pub fn decode_bytes(bytes: Vec<u8>) -> Result<DecodedImage> {
     }
 }
 
-/// Recognise common non-RAW photo formats by their first bytes, so people get a
-/// clear "not supported" message instead of "damaged".
-fn non_raw_kind(bytes: &[u8]) -> Option<&'static str> {
+enum NonRaw {
+    /// A photo format the editor opens.
+    Photo(crate::rendered::Format),
+    /// Something recognisable that it doesn't open, described for the error message.
+    Other(&'static str),
+}
+
+/// Recognise non-RAW files by their first bytes.
+fn non_raw_kind(bytes: &[u8]) -> Option<NonRaw> {
+    use crate::rendered::Format;
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Some("JPEG photo");
+        return Some(NonRaw::Photo(Format::Jpeg));
     }
     if bytes.starts_with(b"\x89PNG") {
-        return Some("PNG image");
+        return Some(NonRaw::Photo(Format::Png));
     }
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
         return Some(match &bytes[8..12] {
-            b"heic" | b"heix" | b"hevc" | b"heim" | b"heis" | b"mif1" | b"msf1" => "HEIC photo",
-            b"avif" | b"avis" => "AVIF image",
-            _ => "video or HEIF file",
+            b"heic" | b"heix" | b"hevc" | b"heim" | b"heis" | b"mif1" | b"msf1" => NonRaw::Photo(Format::Heic),
+            b"avif" | b"avis" => NonRaw::Other("an AVIF image"),
+            _ => NonRaw::Other("a video or another kind of media file"),
         });
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some(NonRaw::Other("a GIF image"));
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(NonRaw::Other("a WebP image"));
     }
     None
 }
@@ -240,6 +281,8 @@ fn decode_source(src: &RawSource) -> Result<DecodedImage> {
         make,
         model,
         kind,
+        format: "RAW".into(),
+        bits: 0,
         width: image.width,
         height: image.height,
         orientation,

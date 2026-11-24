@@ -520,6 +520,8 @@ struct Prepared<'a> {
     vibrance: f32,
     grading: Option<Grading>,
     lut: Option<(&'a Lut3D, f32)>,
+    /// The look chosen from the Profile menu, and how strongly to apply it.
+    style: Option<(std::sync::Arc<Lut3D>, f32)>,
     grain: Option<Grain>,
 }
 
@@ -555,7 +557,12 @@ impl<'a> Prepared<'a> {
         };
         let grain = Grain::new(a, view);
         let vignette = Vignette::new(a, view.crop_px);
+        let style = match crate::profile::table(&a.profile.name) {
+            Some(table) if a.profile.amount > 0.0 => Some((table, a.profile.amount / 100.0)),
+            _ => None,
+        };
         let display = curves.is_some()
+            || style.is_some()
             || mixer_active
             || a.bw
             || a.saturation != 0.0
@@ -579,6 +586,7 @@ impl<'a> Prepared<'a> {
             vibrance: a.vibrance / 100.0,
             grading,
             lut,
+            style,
             grain,
         }
     }
@@ -586,7 +594,19 @@ impl<'a> Prepared<'a> {
     /// One pixel: `p` is the photo's linear colour, `(u, v)` its position in
     /// the photo (0…1) and `(nx, ny)` its position in the finished picture (−1…1).
     #[inline]
-    fn shade(&self, mut p: [f32; 3], u: f32, v: f32, nx: f32, ny: f32, crop_px: (f32, f32)) -> [u8; 3] {
+    fn shade(&self, p: [f32; 3], u: f32, v: f32, nx: f32, ny: f32, crop_px: (f32, f32)) -> [u8; 3] {
+        let d = self.to_display(p, u, v, nx, ny);
+        if !self.display {
+            let lut = encode_lut();
+            return d.map(|v| lut[(v * (LUT_SIZE - 1) as f32 + 0.5) as usize]);
+        }
+        self.finish(d, nx, ny, crop_px).map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+    }
+
+    /// The scene-referred steps: dehaze, white balance, exposure, tone, the
+    /// camera's tone curve and the vignette. Returns linear light in 0…1.
+    #[inline]
+    fn to_display(&self, mut p: [f32; 3], u: f32, v: f32, nx: f32, ny: f32) -> [f32; 3] {
         let (ga, gb, dark) = match self.local {
             Some(m) => m.sample(u, v),
             None => (1.0, 0.0, 0.0),
@@ -614,13 +634,19 @@ impl<'a> Prepared<'a> {
             let g = vig.gain(nx, ny);
             d = d.map(|v| (v * g).min(1.0));
         }
-        if !self.display {
-            let lut = encode_lut();
-            return d.map(|v| lut[(v * (LUT_SIZE - 1) as f32 + 0.5) as usize]);
-        }
+        d
+    }
 
+    /// The display steps, on sRGB-encoded values: profile look, curves,
+    /// colour, look-up table, grain. Returns sRGB-encoded values (not yet clamped).
+    #[inline]
+    fn finish(&self, d: [f32; 3], nx: f32, ny: f32, crop_px: (f32, f32)) -> [f32; 3] {
         let table = encode_table();
         let mut g = d.map(|v| encode_f(table, v));
+        if let Some((style, amount)) = &self.style {
+            let o = style.sample(g);
+            g = [0, 1, 2].map(|i| (g[i] + (o[i] - g[i]) * amount).clamp(0.0, 1.0));
+        }
         if let Some(curves) = &self.curves {
             g = [read_table(&curves[0], g[0]), read_table(&curves[1], g[1]), read_table(&curves[2], g[2])];
         }
@@ -680,7 +706,7 @@ impl<'a> Prepared<'a> {
             let n = n * (0.35 + 0.65 * (4.0 * l * (1.0 - l)).sqrt());
             g = g.map(|v| v + n);
         }
-        g.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+        g
     }
 
     /// Dehaze: positive amounts subtract the estimated haze, negative amounts add some.
@@ -719,6 +745,21 @@ fn bilinear(img: &LinearImage, sx: f32, sy: f32) -> [f32; 3] {
         let bottom = c[i] + (d[i] - c[i]) * tx;
         top + (bottom - top) * ty
     })
+}
+
+/// What an edit does to a list of colours (linear in, sRGB-encoded 0…1 out),
+/// with no photo behind them: used to bake a profile's look into a table.
+pub(crate) fn shade_colours(adj: &Adjustments, colours: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let look = Look::neutral();
+    let blank = LinearImage::new(1, 1, vec![[0.0; 3]]);
+    let scene = Scene { image: &blank, look: &look, lut: None };
+    let view = View::whole(1, 1);
+    let adj = adj.clone().sanitized();
+    let prep = Prepared::new(&scene, &adj, &view);
+    colours
+        .iter()
+        .map(|c| prep.finish(prep.to_display(*c, 0.0, 0.0, 0.0, 0.0), 0.0, 0.0, view.crop_px).map(|v| v.clamp(0.0, 1.0)))
+        .collect()
 }
 
 /// Reads the photo for one output pixel: applies the view's mapping (crop,
@@ -1032,6 +1073,24 @@ mod tests {
         assert_eq!(shade(100.0), 255);
         assert_eq!(shade(0.0), 0);
         assert!((120..=135).contains(&shade(50.0)));
+    }
+
+    #[test]
+    fn a_profile_is_applied_by_its_amount_and_under_the_sliders() {
+        use crate::adjust::ProfileUse;
+        let colour = [0.5, 0.2, 0.1];
+        let spread = |c: [u8; 3]| *c.iter().max().unwrap() as i32 - *c.iter().min().unwrap() as i32;
+        let with = |name: &str, amount: f32| Adjustments { profile: ProfileUse { name: name.into(), amount }, ..Default::default() };
+        let plain = one(colour, &Adjustments::default());
+        assert_eq!(one(colour, &with("vivid", 0.0)), plain);
+        let (half, full, double) = (one(colour, &with("vivid", 50.0)), one(colour, &with("vivid", 100.0)), one(colour, &with("vivid", 200.0)));
+        assert!(spread(plain) < spread(half) && spread(half) < spread(full) && spread(full) < spread(double));
+        assert_eq!(spread(one(colour, &with("mono", 100.0))), 0);
+        // An unknown profile name (say, from a newer version) is ignored, not an error.
+        assert_eq!(one(colour, &with("from-the-future", 100.0)), plain);
+        // The sliders still work on top: Saturation −100 over Vivid is grey.
+        let grey = Adjustments { saturation: -100.0, ..with("vivid", 100.0) };
+        assert_eq!(spread(one(colour, &grey)), 0);
     }
 
     #[test]

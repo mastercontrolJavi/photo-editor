@@ -11,7 +11,8 @@ First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11
 | Area | Status |
 |---|---|
 | Build and launch on Windows | **Passed.** Release build, launched 5 times, opened files, closed cleanly. |
-| Pipeline: decode, adjust, preview, export, edit files | **Passed.** 103 automated tests (see the two sections below for what the new ones cover). |
+| Pipeline: decode, adjust, preview, export, edit files | **Passed.** 115 automated tests (see the sections below for what the new ones cover). |
+| JPEG, PNG, HEIC and profiles (added 2026-11-23, third batch) | **Built and tested by program.** Your real iPhone JPEG and HEIC open correctly. Not yet used by a person. |
 | Detail, optics, zoom, Auto (added 2026-11-23, second batch) | **Built and tested by program.** Checked by eye at 100 % on real photos. Not yet used by a person. |
 | Tone, colour, effects, crop, presets (added 2026-11-23) | **Built and tested by program.** Checked by eye on contact sheets of real photos. Not yet used by a person. |
 | Preview vs export agreement | **Passed.** Within the tolerances documented below. |
@@ -21,6 +22,34 @@ First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11
 
 The automated tests use generic DNGs built by the test code. Real-file results are in the sections below.
 
+## JPEG, PNG, HEIC and profiles (2026-11-23, third batch)
+
+Added: opening JPEG, PNG and HEIC with the type identified from the file's contents; a Profile menu with an Amount slider; starting defaults and notes that depend on the file type.
+
+### What was verified
+
+| Check | Result |
+|---|---|
+| Automated tests | **115 passed, 0 failed** (95 pipeline unit, 10 end-to-end, 10 app). |
+| PNG | Tested: 8-bit, 16-bit and see-through PNGs open; colours arrive exactly; an unedited PNG renders back to the same pixel values. |
+| JPEG | Tested: a JPEG made by the test opens with the right size and colours. |
+| Whole loop for a processed photo | Tested end to end: a PNG saved under a `.dng` name is still recognised as PNG, starts with Sharpening 0, exports unedited to within JPEG's own error, saves and reloads an edit with a profile, and the original file is unchanged. |
+| Your real iPhone JPEG (`IMG_0637.JPEG`, 48 MP) | Opens in about 1.0 s, upright, recognised as Display P3 and converted. |
+| Your real iPhone HEIC (`IMG_6975.HEIC`, 12 MP) | Opens in about 0.7 s through Windows' HEIF decoder, upright, recognised as Display P3 and converted. |
+| Profiles | Tested: Vivid is more saturated than Color, which is more than the original; Flat is less; Monochrome is grey; greys, black and white are unchanged by every colour profile; Amount scales the effect and 0 is exactly the original; the sliders still work on top. |
+| Preset import | Tested: a preset naming "Adobe Vivid" selects Vivid; a third-party look is still reported as unsupported. |
+| Starting defaults | Tested: a starter preset applied to a processed photo keeps Sharpening at 0. |
+| Damaged or unsupported files | Tested: a damaged JPEG, PNG or HEIC names its type in the message; video, GIF, WebP and AVIF are refused with a list of what does open. |
+| By eye | Contact sheets of all 8 profiles on the HEIC and on IMG_7235 show sensible, distinct looks. Screenshots of both real files open in the app are in `Downloads\ProRAW test results\app-screenshots`. |
+
+### Not verified
+
+* **HEIC on a PC without Microsoft's HEIF/HEVC extensions.** This PC has them. On one that doesn't, the app shows a message naming the extensions; that message was only tested with a damaged file.
+* **Colour accuracy of the Display P3 conversion** was checked by eye and by the conversion maths, not against a colour-managed reference.
+* **JPEGs with Adobe RGB or ProPhoto profiles** are treated as sRGB (with a note in the Info tab), so their colours will be slightly off.
+* **JPEGs from cameras that store the picture sideways** rely on the rotation tag being read. The two real files were stored upright, so that path was only covered by the decoder library's own handling.
+* **Nobody has used the Profile menu by hand yet.**
+
 ## Detail, optics and zoom (2026-11-23, second batch)
 
 Added: Texture, Sharpening (radius, detail, masking), Noise Reduction (luminance, colour), Defringe, Remove chromatic aberration, Distortion, Lens vignetting, the parametric curve, Calibration (through presets), Auto, and zoom to 100 % with panning.
@@ -29,7 +58,7 @@ Added: Texture, Sharpening (radius, detail, masking), Noise Reduction (luminance
 
 | Check | Result |
 |---|---|
-| Automated tests | **103 passed, 0 failed** (84 pipeline unit, 9 end-to-end, 10 app). |
+| Automated tests | 103 passed at the time (84 pipeline unit, 9 end-to-end, 10 app). Now 115 with the third batch. |
 | Sharpening | Tested: steepens an edge, leaves flat areas and grey balance alone, and Masking keeps it off fine grain while still sharpening edges. |
 | Noise reduction | Tested: luminance NR halves noise in flat areas and keeps a hard edge; colour NR removes colour speckle without changing brightness or the area's real colour. |
 | Texture, Defringe | Tested: Texture changes medium-sized detail in both directions; Defringe removes purple only beside strong edges and leaves a purple object elsewhere alone. |
@@ -191,7 +220,7 @@ The side-by-side images, exports and screenshots are in `Downloads\ProRAW test r
 
 ## Automated tests
 
-Run: `cargo test --workspace --release -- --nocapture`. Result: **103 passed, 0 failed.**
+Run: `cargo test --workspace --release -- --nocapture`. Result: **115 passed, 0 failed.**
 
 What the tests cover:
 
@@ -324,7 +353,7 @@ Known effects on ProRAW:
 7. **Geometry (perspective), Point Color.** Auto and zoom to 100 % are done.
 8. **Folder browsing with thumbnails.** Use the DNG's embedded preview for speed.
 9. **Copy/paste edits and batch JPEG export.**
-10. **TIFF and HEIC input.** Only after testing real iPhone samples. HEIC decoding needs a codec choice.
+10. ~~**HEIC input.**~~ Done on 2026-11-23, with JPEG and PNG, using Windows' own decoder. Still open: TIFF, and converting Adobe RGB / ProPhoto colour profiles.
 11. **DJI Pocket 3 compatibility check.**
 
 Not planned as-is: Lightroom's AI Denoise, Lens Blur and Adaptive presets. They rely on trained models. The DNG's own sky mask could support a simple "sky" adjustment later.

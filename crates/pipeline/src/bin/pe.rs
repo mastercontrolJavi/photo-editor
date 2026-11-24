@@ -6,6 +6,7 @@
 //!       --out <folder>   (default: <photo folder>\Exported)
 //!       --exposure <EV> --temperature <n> --tint <n>   (default: saved edit)
 //!       --preset <name or file>   apply a starter preset, or a .xmp / .lrtemplate file
+//!       --profile <id>            color, vivid, landscape, portrait, flat, mono, mono-rich
 //!   pe presets                     list the starter presets
 //!   pe fixtures <folder> [--large] write synthetic test DNGs (--large: 12 MP + 48 MP)
 
@@ -32,7 +33,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Some("fixtures") => with_path(&args, |p| fixtures(p, args.iter().any(|a| a == "--large"))),
-        _ => Err(include_str!("pe.rs").lines().skip(1).take(10).map(|l| l.trim_start_matches("//!")).collect::<Vec<_>>().join("\n")),
+        _ => Err(include_str!("pe.rs").lines().skip(1).take(11).map(|l| l.trim_start_matches("//!")).collect::<Vec<_>>().join("\n")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -100,7 +101,8 @@ fn bench(path: &Path) -> Result<(), String> {
 }
 
 fn export(path: &Path, rest: &[String]) -> Result<(), String> {
-    let mut adj = sidecar::load(path).map_err(|e| e.to_string())?.unwrap_or_default();
+    let d = decode_file(path).map_err(|e| e.to_string())?;
+    let mut adj = sidecar::load(path).map_err(|e| e.to_string())?.unwrap_or_else(|| d.info.starting_adjustments());
     let mut opts = ExportOptions::next_to(path);
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
@@ -110,11 +112,11 @@ fn export(path: &Path, rest: &[String]) -> Result<(), String> {
             "--exposure" => adj.exposure = val()?.parse().map_err(|_| "bad --exposure")?,
             "--temperature" => adj.temperature = val()?.parse().map_err(|_| "bad --temperature")?,
             "--tint" => adj.tint = val()?.parse().map_err(|_| "bad --tint")?,
-            "--preset" => adj = find_preset(val()?)?.apply(&adj),
+            "--preset" => adj = find_preset(val()?)?.apply_from(&adj, &d.info.starting_adjustments()),
+            "--profile" => adj.profile.name = val()?.to_string(),
             other => return Err(format!("unknown option {other}")),
         }
     }
-    let d = decode_file(path).map_err(|e| e.to_string())?;
     let out = export_jpeg(path, &d, &adj, &opts).map_err(|e| e.to_string())?;
     let (w, h) = adj.crop.output_size(d.image.width, d.image.height);
     println!("Wrote {} ({w} x {h})", out.display());

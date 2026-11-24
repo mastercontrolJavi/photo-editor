@@ -1,15 +1,37 @@
 # Photo Editor
 
-An offline Windows photo editor for iPhone ProRAW DNGs, written in Rust.
+An offline Windows photo editor, written in Rust. It was built for iPhone ProRAW and also opens JPEG, PNG and HEIC.
 It needs no account, network connection or paid service.
 
-You open a DNG, edit it with Lightroom-style controls, crop it, and export a full-size sRGB JPEG. Edits are saved beside the photo and never change it.
+You open a photo, edit it with Lightroom-style controls, crop it, and export a full-size sRGB JPEG. Edits are saved beside the photo and never change it.
+
+### File types
+
+The app works out the type from the file's contents, not its name.
+
+| Type | What you get |
+|---|---|
+| **RAW** (DNG, including iPhone ProRAW; other RAW formats the decoder knows) | The most room to edit: highlights and shadows the camera recorded can be brought back. Starts with Sharpening 40. |
+| **JPEG, PNG** | Every slider works. The picture is already processed and usually 8-bit, so blown highlights can't be recovered and big changes show banding sooner. Starts with Sharpening 0. |
+| **HEIC** (iPhone's default photo format) | Same as JPEG. Decoded by Windows' own HEIF/HEVC decoder, so it needs the "HEIF Image Extensions" and "HEVC Video Extensions" from the Microsoft Store if the PC doesn't have them (many do). |
+
+iPhone JPEG and HEIC photos store their colours as Display P3; the app converts them to sRGB for editing. Other colour profiles (Adobe RGB, ProPhoto) are not converted yet.
+
+The Edit tab shows the same sections for every type. What changes is the **Profile** menu, the starting defaults, and a short note saying what kind of file is open.
+
+### Profiles
+
+The Profile menu sets the photo's starting look, underneath the sliders, with an Amount slider (0–200).
+
+* The first entry is the camera's own rendering: **Apple ProRAW** for iPhone ProRAW, **Camera** for other RAW files, **As shot** for JPEG, PNG and HEIC.
+* **Color, Vivid, Landscape, Portrait, Flat, Monochrome, Monochrome Rich** are this app's own looks. They play the same role as Lightroom's Adobe Color, Adobe Vivid and so on, but they are not Adobe's and won't match them exactly.
+* An imported preset that names one of Lightroom's Adobe profiles selects the matching one here.
 
 ## Using it
 
 | Action | How |
 |---|---|
-| Open a photo | **Open…** (Ctrl+O), drop a file on the window, or `photo-editor.exe IMG_0001.DNG` |
+| Open a photo | **Open…** (Ctrl+O), drop a file on the window, or `photo-editor.exe IMG_0001.DNG`. RAW, JPEG, PNG and HEIC all open the same way. |
 | Edit | The **Edit** tab. Double-click any slider to reset it. |
 | Crop | The **Crop** tab: drag the corners or edges, pick a shape, straighten, rotate, flip. Press Enter when done. |
 | Presets | The **Presets** tab: click one to apply it. |
@@ -23,7 +45,7 @@ You open a DNG, edit it with Lightroom-style controls, crop it, and export a ful
 
 | Section | Controls |
 |---|---|
-| Top row | Auto (sets the Light sliders from the photo's brightness), B&W, Reset all |
+| Top row | Auto (sets the Light sliders from the photo's brightness), B&W, Reset all, Profile and its Amount |
 | Light | Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Curve (point curves for RGB, Red, Green, Blue, plus the four parametric sliders) |
 | Color | Temp, Tint, Vibrance, Saturation, B&W, Color Mixer (hue / saturation / luminance for 8 colours), B&W Mixer, Color Grading (shadows, midtones, highlights, global, blending, balance) |
 | Effects | Texture, Clarity, Dehaze, Vignette (midpoint, feather, roundness), Grain (size, roughness) |
@@ -33,7 +55,7 @@ You open a DNG, edit it with Lightroom-style controls, crop it, and export a ful
 
 The slider names and ranges follow Lightroom's, but the maths behind them is this app's own. The same number gives a similar result, not an identical one.
 
-* **Sharpening starts at 40**, as in Lightroom. RAW data is slightly soft until sharpened. Set it to 0 for none.
+* **Sharpening starts at 40 for RAW**, as in Lightroom, because RAW data is slightly soft until sharpened. It starts at 0 for JPEG, PNG and HEIC, which the camera already sharpened.
 * **Sharpening and noise reduction only show properly at 100%.** In the fit-to-window view each screen pixel covers several photo pixels, so they fade out, exactly as they do when the exported photo is viewed small.
 * **Lens corrections:** iPhone ProRAW files are already corrected by the phone, so there is nothing to switch on. The Optics sliders are for touch-ups. "Remove chromatic aberration" measures the colour misalignment in each photo and does nothing if there is none.
 * **Auto** is a simple rule based on the photo's brightness. It is not Lightroom's Auto, which uses a trained model.
@@ -90,6 +112,7 @@ If the build fails with `LNK1104` because the folder path is too long, use a sho
 .\target\release\pe.exe bench IMG_0001.DNG    # open / preview / export timings on this PC
 .\target\release\pe.exe export IMG_0001.DNG --exposure 0.5
 .\target\release\pe.exe export IMG_0001.DNG --preset "Soft Film"      # or a .xmp / .lrtemplate file
+.\target\release\pe.exe export IMG_0002.HEIC --profile vivid            # JPEG, PNG and HEIC work too
 .\target\release\pe.exe presets                                        # list the starter presets
 .\target\release\pe.exe fixtures .\fixtures   # synthetic test DNGs (add --large for 12/48 MP)
 ```
@@ -111,6 +134,8 @@ Inside `crates/pipeline/src`:
 | `detail.rs` | Texture, Sharpening, Noise Reduction, Defringe |
 | `lens.rs` | Distortion, lens vignetting, measuring and removing chromatic aberration |
 | `auto.rs` | The Auto button's rule |
+| `rendered.rs`, `wic.rs` | Opening JPEG, PNG and HEIC (HEIC through Windows' own decoder) |
+| `profile.rs` | The Profile menu's looks |
 | `geometry.rs` | Crop, straighten, rotate, flip |
 | `preset.rs` | Starter presets, Lightroom preset import, the presets folder |
 | `lut.rs` | `.cube` look-up tables |

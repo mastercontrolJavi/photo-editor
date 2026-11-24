@@ -112,7 +112,7 @@ impl Engine {
                         previews.push(Arc::new(from.downscale_to_fit(edge)));
                     }
                     let full = (decoded.image.width, decoded.image.height);
-                    let before = render_preview(&previews[0], &Adjustments::default(), &decoded.info.look(), None, full);
+                    let before = render_preview(&previews[0], &decoded.info.starting_adjustments(), &decoded.info.look(), None, full);
                     let saved = sidecar::load(&path).map_err(|e| e.to_string());
                     Msg::Loaded(Box::new(Loaded { generation, path, decoded, previews, before, saved, decode_ms }))
                 }

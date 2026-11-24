@@ -33,9 +33,12 @@ pub mod local;
 pub mod look;
 pub mod lut;
 pub mod preset;
+pub mod profile;
 pub mod probe;
 pub mod render;
+pub mod rendered;
 pub mod sidecar;
+mod wic;
 
 pub use adjust::Adjustments;
 pub use decode::{decode_file, DecodedImage, SourceInfo};

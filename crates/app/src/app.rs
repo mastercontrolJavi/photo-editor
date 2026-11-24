@@ -109,7 +109,10 @@ pub(crate) struct Doc {
     /// Which of `previews` is being rendered.
     pub level: usize,
     pub adjustments: Adjustments,
-    /// What's on disk in the edit file (or defaults if there is none).
+    /// The edit this photo starts with and returns to on "Reset all". It
+    /// depends on the kind of file (see `SourceInfo::starting_adjustments`).
+    pub fresh: Adjustments,
+    /// What's on disk in the edit file (or the fresh edit if there is none).
     pub saved: Adjustments,
     /// The edit as of the last finished change; Undo steps between these.
     pub committed: Adjustments,
@@ -203,7 +206,7 @@ impl EditorApp {
             loading: None,
             show_before: false,
             exporting: false,
-            status: "Ready. Open a DNG to start (Ctrl+O), or drop one onto the window.".into(),
+            status: "Ready. Open a photo to start (Ctrl+O), or drop one onto the window.".into(),
             status_is_error: false,
             last_export: None,
             sidecar_warning: None,
@@ -262,7 +265,9 @@ impl EditorApp {
     fn pick_and_open(&mut self) {
         let mut dialog = rfd::FileDialog::new()
             .set_title("Open photo")
-            .add_filter("RAW photos", &["dng", "DNG", "cr2", "cr3", "nef", "arw", "raf", "rw2", "orf"])
+            .add_filter("Photos", &["dng", "jpg", "jpeg", "png", "heic", "heif", "cr2", "cr3", "nef", "arw", "raf", "rw2", "orf"])
+            .add_filter("RAW photos", &["dng", "cr2", "cr3", "nef", "arw", "raf", "rw2", "orf"])
+            .add_filter("JPEG, PNG, HEIC", &["jpg", "jpeg", "png", "heic", "heif"])
             .add_filter("All files", &["*"]);
         if let Some(dir) = self.doc.as_ref().and_then(|d| d.path.parent()) {
             dialog = dialog.set_directory(dir);
@@ -339,8 +344,7 @@ impl EditorApp {
         // as soon as the button is released.
         let level = if dragging { (doc.level + 1).min(doc.previews.len() - 1) } else { doc.level };
         // "Before" is the photo with no edits, framed the same way.
-        let adjustments =
-            if self.show_before { Adjustments::default().with_crop_of(&doc.adjustments) } else { doc.adjustments.clone() };
+        let adjustments = if self.show_before { doc.fresh.clone().with_crop_of(&doc.adjustments) } else { doc.adjustments.clone() };
         // Zoomed in, only the visible part is rendered, from the full-size photo
         // (at half size while dragging).
         let region = doc.region.map(|r| {
@@ -463,17 +467,18 @@ impl EditorApp {
         if self.doc.is_some() {
             self.zoom = Zoom::FIT;
         }
+        let fresh = l.decoded.info.starting_adjustments();
         let (adjustments, warning) = match l.saved {
             Ok(Some(a)) => (a, None),
-            Ok(None) => (Adjustments::default(), None),
-            Err(e) => (Adjustments::default(), Some(format!("{e} Starting from the original; saving will replace it."))),
+            Ok(None) => (fresh.clone(), None),
+            Err(e) => (fresh.clone(), Some(format!("{e} Starting from the original; saving will replace it."))),
         };
         self.sidecar_warning = warning;
         let before_tex = ctx.load_texture("before", to_color_image(&l.before), TEX_OPTIONS);
         // Until the first edited render arrives, show the unedited image.
         let after_tex = ctx.load_texture("after", to_color_image(&l.before), TEX_OPTIONS);
         let export_dir = ExportOptions::next_to(&l.path).out_dir;
-        let restored = !adjustments.is_default();
+        let restored = adjustments != fresh;
         let info = &l.decoded.info;
         self.set_status(
             format!(
@@ -492,6 +497,7 @@ impl EditorApp {
             shown_size: (l.before.width, l.before.height),
             previews: l.previews,
             level: 0,
+            fresh,
             saved: adjustments.clone(),
             committed: adjustments.clone(),
             undo: Vec::new(),

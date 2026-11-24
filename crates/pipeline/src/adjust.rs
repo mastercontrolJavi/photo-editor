@@ -206,9 +206,28 @@ fn hundred() -> f32 {
     100.0
 }
 
+/// The starting look chosen from the Profile menu (see `profile.rs`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileUse {
+    /// Empty for the camera's own rendering.
+    pub name: String,
+    /// 0 … 200: how strongly the look is applied (100 = as designed).
+    pub amount: f32,
+}
+
+impl Default for ProfileUse {
+    fn default() -> Self {
+        Self { name: String::new(), amount: 100.0 }
+    }
+}
+
+pub const PROFILE_AMOUNT: (f32, f32) = (0.0, 200.0);
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Adjustments {
+    pub profile: ProfileUse,
     // ---- Light
     /// Exposure change in stops (EV). +1 doubles the light.
     pub exposure: f32,
@@ -276,6 +295,10 @@ impl Adjustments {
     /// default, so a hand-edited or damaged edit file can't break rendering.
     pub fn sanitized(mut self) -> Self {
         let pct = |v: f32| fix(v, PERCENT, 0.0);
+        if !crate::profile::exists(&self.profile.name) {
+            self.profile.name.clear();
+        }
+        self.profile.amount = fix(self.profile.amount, PROFILE_AMOUNT, 100.0);
         self.exposure = fix(self.exposure, EXPOSURE_RANGE, 0.0);
         self.contrast = pct(self.contrast);
         self.highlights = pct(self.highlights);

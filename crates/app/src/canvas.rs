@@ -218,7 +218,7 @@ impl EditorApp {
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new("No photo open").size(18.0));
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("Open an iPhone ProRAW DNG, or drop one here.").color(theme::MUTED));
+                ui.label(egui::RichText::new("Open a RAW, JPEG, PNG or HEIC photo, or drop one here.").color(theme::MUTED));
                 ui.add_space(12.0);
                 if ui.button("Open photo…").clicked() {
                     self.request_open_dialog();

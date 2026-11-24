@@ -76,6 +76,12 @@ impl Lut3D {
         Ok(Lut3D { title, size, data, domain_min, domain_max })
     }
 
+    /// A table built in memory: `size³` colours, red changing fastest, for inputs 0…1.
+    pub fn from_grid(title: &str, size: usize, data: Vec<[f32; 3]>) -> Self {
+        assert_eq!(data.len(), size * size * size, "a LUT needs size³ colours");
+        Lut3D { title: title.into(), size, data, domain_min: [0.0; 3], domain_max: [1.0; 3] }
+    }
+
     /// A LUT that changes nothing (for tests).
     pub fn identity(size: usize) -> Self {
         let n = (size - 1) as f32;

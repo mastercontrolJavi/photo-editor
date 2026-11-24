@@ -1,7 +1,7 @@
 //! Render one photo many ways side by side, to check sliders and presets by eye.
 //!
 //! ```text
-//! cargo run --release -p pipeline --example contact_sheet -- <presets|sliders|optics|detail> <out.jpg> <photo.dng> [x y]
+//! cargo run --release -p pipeline --example contact_sheet -- <presets|profiles|sliders|optics|detail> <out.jpg> <photo> [x y]
 //! ```
 //!
 //! Cells are filled left to right, top to bottom, in the order printed.
@@ -18,12 +18,22 @@ const COLUMNS: usize = 4;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [mode, out, photo, ..] = args.as_slice() else {
-        eprintln!("usage: contact_sheet <presets|sliders|optics|detail> <out.jpg> <photo.dng> [x y]");
+        eprintln!("usage: contact_sheet <presets|profiles|sliders|optics|detail> <out.jpg> <photo> [x y]");
         std::process::exit(2);
     };
+    let decoded = decode_file(Path::new(photo)).expect("decode");
+    let fresh = decoded.info.starting_adjustments();
     let cells: Vec<(String, Adjustments)> = match mode.as_str() {
-        "presets" => std::iter::once(("Original".to_string(), Adjustments::default()))
-            .chain(pipeline::preset::builtin().into_iter().map(|p| (p.name.clone(), p.apply(&Adjustments::default()))))
+        "presets" => std::iter::once(("Original".to_string(), fresh.clone()))
+            .chain(pipeline::preset::builtin().into_iter().map(|p| (p.name.clone(), p.apply_from(&fresh, &fresh))))
+            .collect(),
+        "profiles" => pipeline::profile::choices(decoded.info.kind, &decoded.info.make)
+            .into_iter()
+            .map(|p| {
+                let mut a = fresh.clone();
+                a.profile.name = p.id.to_string();
+                (p.label, a)
+            })
             .collect(),
         "optics" => optics_cells(),
         "detail" => detail_cells(),
@@ -31,7 +41,6 @@ fn main() {
     };
     let spot: Vec<f64> = args[3..].iter().filter_map(|v| v.parse().ok()).collect();
     let spot = (spot.first().copied().unwrap_or(0.5), spot.get(1).copied().unwrap_or(0.5));
-    let decoded = decode_file(Path::new(photo)).expect("decode");
     let small = decoded.image.downscale_to_fit(CELL_EDGE);
     let look = decoded.info.look();
     let (mut w, mut h) = (small.width, small.height);

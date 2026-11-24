@@ -55,7 +55,7 @@ pub struct Preset {
 /// Overlay `patch` on `base`. Objects merge key by key; two lists of objects of
 /// the same length merge item by item (the eight Color Mixer bands); anything
 /// else is replaced.
-fn merge(base: &mut Value, patch: &Value) {
+pub(crate) fn merge(base: &mut Value, patch: &Value) {
     match (base, patch) {
         (Value::Object(b), Value::Object(p)) => {
             for (k, v) in p {
@@ -74,7 +74,14 @@ fn merge(base: &mut Value, patch: &Value) {
 impl Preset {
     /// The edit you get by applying this preset to `current`. The crop is never changed.
     pub fn apply(&self, current: &Adjustments) -> Adjustments {
-        let start = if self.replace { Adjustments::default() } else { current.clone() };
+        self.apply_from(current, &Adjustments::default())
+    }
+
+    /// Like [`Preset::apply`], for a photo whose untouched state is `fresh`
+    /// rather than the general default (an already-processed photo starts
+    /// with no sharpening, for instance).
+    pub fn apply_from(&self, current: &Adjustments, fresh: &Adjustments) -> Adjustments {
+        let start = if self.replace { fresh.clone() } else { current.clone() };
         let mut value = serde_json::to_value(&start).expect("adjustments always serialise");
         let mut settings = self.settings.clone();
         if let Some(obj) = settings.as_object_mut() {
@@ -378,6 +385,17 @@ fn map_lightroom(v: &Values) -> (Map<String, Value>, Vec<String>) {
         put(&mut out, ours, theirs);
     }
 
+    // Lightroom's own profiles have counterparts here; anything else is a custom look.
+    let adobe_profile = match (v.get("Name"), v.get("CameraProfile")) {
+        (Some(Val::Text(name)), _) if v.contains_key("Look") => Some(name.as_str()),
+        (_, Some(Val::Text(name))) => Some(name.as_str()),
+        _ => None,
+    };
+    let matched_profile = adobe_profile.and_then(crate::profile::for_adobe_name);
+    if let Some(id) = matched_profile {
+        out.insert("profile".into(), json!({ "name": id }));
+    }
+
     // Color Mixer.
     let mut bands = Vec::new();
     let mut any_band = false;
@@ -524,7 +542,8 @@ fn map_lightroom(v: &Values) -> (Map<String, Value>, Vec<String>) {
             missing.push(what.to_string());
         }
     };
-    note(v.contains_key("Look") || v.contains_key("LookTable") || v.contains_key("RGBTable"), "Colour profile / look table");
+    let custom_look = v.contains_key("LookTable") || v.contains_key("RGBTable") || (v.contains_key("Look") && matched_profile.is_none());
+    note(custom_look, "Colour profile / look table");
     note(
         ["MaskGroupBasedCorrections", "GradientBasedCorrections", "CircularGradientBasedCorrections", "PaintBasedCorrections"]
             .iter()
@@ -792,6 +811,32 @@ mod tests {
         let a = p.apply(&Adjustments::default());
         assert_eq!((a.blacks, a.contrast, a.exposure, a.vibrance, a.mixer[1].luminance), (25.0, -10.0, 0.2, 15.0, 12.0));
         assert_eq!(a.curve.rgb, vec![[0.0, 30.0 / 255.0], [1.0, 1.0]]);
+    }
+
+    #[test]
+    fn lightrooms_own_profiles_map_to_this_apps_profiles() {
+        let xmp = r#"<rdf:Description crs:Version="15" crs:Contrast2012="+5">
+   <crs:Look><rdf:Description crs:Name="Adobe Vivid" crs:Amount="1"/></crs:Look></rdf:Description>"#;
+        let p = from_xmp(xmp, "x").unwrap();
+        assert_eq!(p.apply(&Adjustments::default()).profile.name, "vivid");
+        assert!(p.unsupported.is_empty(), "{:?}", p.unsupported);
+        // A third-party look is reported, and the profile is left alone.
+        let custom = xmp.replace("Adobe Vivid", "Kodak-ish 400");
+        let p = from_xmp(&custom, "x").unwrap();
+        assert!(p.unsupported.iter().any(|u| u.contains("look table")));
+        assert_eq!(p.apply(&Adjustments::default()).profile.name, "");
+    }
+
+    #[test]
+    fn a_whole_look_preset_starts_from_the_photos_own_fresh_state() {
+        // An already-processed photo starts with no sharpening; a starter preset keeps it that way.
+        let mut fresh = Adjustments::default();
+        fresh.sharpen.amount = 0.0;
+        let starter = builtin().into_iter().next().unwrap();
+        let current = Adjustments { exposure: 2.0, ..fresh.clone() };
+        let a = starter.apply_from(&current, &fresh);
+        assert_eq!(a.sharpen.amount, 0.0);
+        assert_ne!(a.exposure, 2.0);
     }
 
     #[test]

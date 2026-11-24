@@ -124,6 +124,44 @@ fn export_is_full_size_srgb_tagged_and_leaves_the_source_untouched() {
 }
 
 #[test]
+fn an_already_processed_photo_goes_through_the_whole_loop() {
+    use pipeline::decode::SourceKind;
+    let dir = tempfile::tempdir().unwrap();
+    // A PNG saved under a misleading name: the type comes from the contents.
+    let picture = image::RgbImage::from_fn(320, 200, |x, y| image::Rgb([(x / 2) as u8, (y) as u8, 90]));
+    let src = dir.path().join("holiday.dng");
+    picture.save_with_format(&src, image::ImageFormat::Png).unwrap();
+    let before = fnv1a(&std::fs::read(&src).unwrap());
+
+    let d = decode_file(&src).unwrap();
+    assert_eq!((d.info.kind, d.info.format.as_str()), (SourceKind::Rendered, "PNG"));
+    assert_eq!((d.info.width, d.info.height), (320, 200));
+    // It starts with no sharpening, unlike a RAW photo.
+    let fresh = d.info.starting_adjustments();
+    assert_eq!(fresh.sharpen.amount, 0.0);
+    assert!(Adjustments::default().sharpen.amount > 0.0);
+
+    // Unedited, the export shows the same picture (within JPEG's own error).
+    let out = export_jpeg(&src, &d, &fresh, &ExportOptions::next_to(&src)).unwrap();
+    let (jpg, icc_bytes) = read_jpeg(&out);
+    assert_eq!(jpg.dimensions(), (320, 200));
+    assert_eq!(icc_bytes.as_deref(), Some(icc::srgb_profile()));
+    let worst = jpg.pixels().zip(picture.pixels()).flat_map(|(a, b)| (0..3).map(move |c| (a[c] as i32 - b[c] as i32).abs())).max().unwrap();
+    assert!(worst <= 12, "unedited export differs from the original by up to {worst} levels");
+
+    // An edit with a profile saves, reloads and changes the export.
+    let mut adj = Adjustments { exposure: 0.5, ..fresh };
+    adj.profile.name = "mono".into();
+    sidecar::save(&src, &adj).unwrap();
+    assert_eq!(sidecar::load(&src).unwrap(), Some(adj.clone()));
+    let out = export_jpeg(&src, &d, &adj, &ExportOptions::next_to(&src)).unwrap();
+    let (mono, _) = read_jpeg(&out);
+    let p = mono.get_pixel(200, 100);
+    assert!((p[0] as i32 - p[2] as i32).abs() <= 3, "monochrome profile: {p:?}");
+    assert_eq!(fnv1a(&std::fs::read(&src).unwrap()), before, "the original is never written to");
+}
+
+#[test]
 fn export_applies_the_crop_and_turns() {
     let dir = tempfile::tempdir().unwrap();
     let src = write_fixture(dir.path(), "crop.dng", &FixtureSpec::new(600, 400, FixtureKind::Linear));
@@ -232,11 +270,22 @@ fn bad_files_give_clear_errors_not_crashes() {
     let e = decode_bytes(garbage).unwrap_err();
     assert!(matches!(e, PipelineError::Unreadable { .. } | PipelineError::Unsupported { .. }), "{e}");
 
-    // Ordinary iPhone JPEG / HEIC files are named as such, not called "damaged".
+    // A damaged JPEG or HEIC is named as such in the message.
     let jpeg = decode_bytes(b"\xFF\xD8\xFF\xE1rest of a jpeg".to_vec()).unwrap_err();
-    assert!(matches!(jpeg, PipelineError::Unsupported { .. }) && jpeg.to_string().contains("JPEG"), "{jpeg}");
+    assert!(jpeg.to_string().contains("JPEG"), "{jpeg}");
     let heic = decode_bytes(b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec()).unwrap_err();
-    assert!(matches!(heic, PipelineError::Unsupported { .. }) && heic.to_string().contains("HEIC"), "{heic}");
+    assert!(heic.to_string().contains("HEIC"), "{heic}");
+    // Files the editor doesn't open say what they are and what it does open.
+    let video = decode_bytes(b"\0\0\0\x18ftypmp42\0\0\0\0isommp42".to_vec()).unwrap_err();
+    assert!(matches!(video, PipelineError::Unsupported { .. }) && video.to_string().contains("JPEG, PNG and HEIC"), "{video}");
+    for (bytes, what) in [
+        (&b"GIF89a  "[..], "GIF"),
+        (&b"RIFF$   WEBPVP8 "[..], "WebP"),
+        (&b"   ftypavif    avifmif1"[..], "AVIF"),
+    ] {
+        let e = decode_bytes(bytes.to_vec()).unwrap_err();
+        assert!(matches!(e, PipelineError::Unsupported { .. }) && e.to_string().contains(what), "{what}: {e}");
+    }
 
     let text = decode_bytes(b"II*\0this is not a real photo".to_vec()).unwrap_err();
     println!("tiny TIFF header: {text}");

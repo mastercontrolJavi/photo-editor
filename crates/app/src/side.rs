@@ -1,10 +1,10 @@
 //! The side panel: Edit, Crop, Presets and Info.
 
 use eframe::egui::{self, Color32, Margin, RichText};
-use pipeline::adjust::{Wheel, BAND_HUES, BAND_NAMES, DEFAULT_SHARPENING, DEFRINGE, EXPOSURE_RANGE, SHARPEN_AMOUNT, SHARPEN_RADIUS};
+use pipeline::adjust::{Wheel, BAND_HUES, BAND_NAMES, DEFRINGE, EXPOSURE_RANGE, PROFILE_AMOUNT, SHARPEN_AMOUNT, SHARPEN_RADIUS};
 use pipeline::decode::SourceKind;
 use pipeline::geometry::ANGLE_RANGE;
-use pipeline::{preset, Adjustments, Crop};
+use pipeline::{preset, Crop};
 
 use crate::app::{Aspect, EditorApp, Notice, Tab};
 use crate::theme;
@@ -48,18 +48,52 @@ impl EditorApp {
         let (mut curve_channel, mut mixer_tab) = (self.curve_channel, self.mixer_tab);
         let mut auto = false;
         let doc = self.doc.as_mut().expect("the panel is only shown with a photo open");
-        let (chromatic, has_lens_data) = (doc.decoded.info.chromatic, doc.decoded.info.has_lens_opcodes);
+        let info = &doc.decoded.info;
+        let (chromatic, has_lens_data, kind) = (info.chromatic, info.has_lens_opcodes, info.kind);
+        let profiles = pipeline::profile::choices(kind, &info.make);
+        // What this kind of file is, and what that means for editing it.
+        let about = if kind.is_raw() {
+            None
+        } else {
+            Some(format!(
+                "{} · {}-bit · already processed. All the sliders work; RAW files leave more room to recover bright and dark areas.",
+                info.format, info.bits
+            ))
+        };
+        let fresh = doc.fresh.clone();
         let a = &mut doc.adjustments;
 
         ui.horizontal(|ui| {
             auto = ui.button("Auto").on_hover_text("Set the Light sliders from the photo's brightness").clicked();
             changed |= ui.toggle_value(&mut a.bw, "B&W").on_hover_text("Black & white").changed();
-            let untouched = a.clone().with_crop_of(&Adjustments::default()).is_default();
+            let untouched = a.clone().with_crop_of(&fresh) == fresh;
             if ui.add_enabled(!untouched, egui::Button::new("Reset all")).on_hover_text("Back to the photo as shot. The crop is kept.").clicked() {
-                *a = Adjustments::default().with_crop_of(a);
+                *a = fresh.clone().with_crop_of(a);
                 changed = true;
             }
         });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Profile").color(theme::MUTED));
+            let current = profiles.iter().find(|p| p.id == a.profile.name).unwrap_or(&profiles[0]).label.clone();
+            egui::ComboBox::from_id_salt("profile").selected_text(current).width(200.0).show_ui(ui, |ui| {
+                for p in &profiles {
+                    if p.separator_before {
+                        ui.separator();
+                    }
+                    if ui.selectable_label(a.profile.name == p.id, &p.label).clicked() && a.profile.name != p.id {
+                        a.profile.name = p.id.to_string();
+                        changed = true;
+                    }
+                }
+            });
+        });
+        if !a.profile.name.is_empty() {
+            let amount = SliderSpec { range: PROFILE_AMOUNT, ..SliderSpec::amount("Amount", 100.0) };
+            changed |= slider(ui, &mut a.profile.amount, amount);
+        }
+        if let Some(about) = &about {
+            ui.label(RichText::new(about).color(theme::MUTED).small());
+        }
         ui.label(RichText::new("Double-click a slider to reset it.").color(theme::MUTED).small());
         ui.add_space(4.0);
 
@@ -180,7 +214,8 @@ impl EditorApp {
         });
 
         section(ui, "Detail", true, |ui| {
-            let sharpening = SliderSpec { range: SHARPEN_AMOUNT, ..SliderSpec::amount("Sharpening", DEFAULT_SHARPENING) };
+            // Double-click returns to this kind of photo's own default (40 for RAW, 0 for processed photos).
+            let sharpening = SliderSpec { range: SHARPEN_AMOUNT, ..SliderSpec::amount("Sharpening", fresh.sharpen.amount) };
             changed |= slider(ui, &mut a.sharpen.amount, sharpening);
             let touched = a.sharpen.radius != 1.0 || a.sharpen.detail != 25.0 || a.sharpen.masking != 0.0;
             subsection(ui, "Sharpening options", touched, |ui| {
@@ -203,8 +238,10 @@ impl EditorApp {
         section(ui, "Optics", false, |ui| {
             let note = if has_lens_data {
                 "This file carries its own lens-correction data, which this app doesn't apply yet."
-            } else {
+            } else if kind.is_raw() {
                 "The camera already corrected this photo for its lens before saving it. These controls are for touch-ups."
+            } else {
+                "This photo is already processed, so any lens corrections were made by the camera. These controls are for touch-ups."
             };
             ui.label(RichText::new(note).color(theme::MUTED).small());
             ui.add_space(4.0);
@@ -254,7 +291,7 @@ impl EditorApp {
             // Judge the photo as shot, from the smallest preview (it only needs the overall brightness).
             if let Some(small) = doc.previews.last() {
                 let unedited =
-                    pipeline::render_preview(small, &Adjustments::default(), &doc.decoded.info.look(), None, doc.full_size());
+                    pipeline::render_preview(small, &doc.fresh, &doc.decoded.info.look(), None, doc.full_size());
                 doc.adjustments = pipeline::auto::auto_tone(&unedited, &doc.adjustments);
                 changed = true;
             }
@@ -457,7 +494,7 @@ impl EditorApp {
         if let Some(i) = apply {
             let preset = self.presets[i].clone();
             if let Some(doc) = self.doc.as_mut() {
-                doc.adjustments = preset.apply(&doc.adjustments);
+                doc.adjustments = preset.apply_from(&doc.adjustments, &doc.fresh);
             }
             self.set_status(format!("Applied \"{}\"", preset.name), false);
             self.adjustments_changed();
@@ -534,15 +571,20 @@ impl EditorApp {
         heading(ui, "PHOTO");
         let info = &doc.decoded.info;
         let kind = match info.kind {
-            SourceKind::LinearRaw => "Linear DNG (ProRAW type)",
-            SourceKind::BayerCfa => "Bayer RAW",
+            SourceKind::LinearRaw => "RAW · linear DNG (ProRAW type)".to_string(),
+            SourceKind::BayerCfa => "RAW · Bayer".to_string(),
+            SourceKind::Rendered => format!("{} · {}-bit, already processed", info.format, info.bits),
         };
         let camera = format!("{} {}", info.make, info.model);
-        info_row(ui, "Camera", camera.trim());
-        info_row(ui, "Type", kind);
+        if !camera.trim().is_empty() {
+            info_row(ui, "Camera", camera.trim());
+        }
+        info_row(ui, "Type", &kind);
         info_row(ui, "Size", &format!("{} × {}", info.width, info.height));
-        info_row(ui, "Compression", info.tags.compression_name());
-        info_row(ui, "Baseline exp.", &format!("{:+.2} EV", info.baseline_exposure));
+        if info.kind.is_raw() {
+            info_row(ui, "Compression", info.tags.compression_name());
+            info_row(ui, "Baseline exp.", &format!("{:+.2} EV", info.baseline_exposure));
+        }
         info_row(ui, "Opened in", &format!("{:.0} ms", doc.decode_ms));
         for note in &info.notes {
             ui.add_space(4.0);
