@@ -1,7 +1,8 @@
 //! Full-resolution JPEG export.
 //!
 //! Rendering always starts again from the full-size linear image (never from
-//! the preview), using the same `render_srgb8` the preview uses.
+//! the preview), using the same `render` the preview uses. The crop, turns and
+//! straightening are applied here, so the JPEG is the finished picture.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -14,7 +15,9 @@ use crate::adjust::Adjustments;
 use crate::decode::DecodedImage;
 use crate::error::{PipelineError, Result};
 use crate::icc;
-use crate::render::{render_srgb8, RenderedImage};
+use crate::lut::Lut3D;
+use crate::preset;
+use crate::render::{render, RenderedImage, Scene, View};
 
 #[derive(Debug, Clone)]
 pub struct ExportOptions {
@@ -48,10 +51,22 @@ pub fn encode_jpeg(img: &RenderedImage, quality: u8) -> Result<Vec<u8>> {
 /// If that name is taken, writes `<stem>-1.jpg`, `<stem>-2.jpg`, … — existing
 /// files (including the source) are never overwritten. Returns the path written.
 pub fn export_jpeg(source: &Path, decoded: &DecodedImage, adj: &Adjustments, opts: &ExportOptions) -> Result<PathBuf> {
-    let rendered = render_srgb8(&decoded.image, adj, &decoded.info.look());
+    let lut = match &adj.lut {
+        Some(l) => Some(preset::load_lut(&preset::library_dir(), &l.name).map_err(PipelineError::Look)?),
+        None => None,
+    };
+    let rendered = render_full(decoded, adj, lut.as_ref());
     let bytes = encode_jpeg(&rendered, opts.quality)?;
     let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "export".into());
     write_unique(&opts.out_dir, &stem, "jpg", &bytes)
+}
+
+/// Render the finished picture at full resolution: the whole edit, cropped.
+pub fn render_full(decoded: &DecodedImage, adj: &Adjustments, lut: Option<&Lut3D>) -> RenderedImage {
+    let look = decoded.info.look();
+    let scene = Scene { image: &decoded.image, look: &look, lut };
+    let (view, width, height) = View::export(&adj.crop, decoded.image.width, decoded.image.height);
+    render(&scene, adj, &view, width, height)
 }
 
 /// Write `bytes` to the first free `<stem>[-n].<ext>` in `dir`, reserving the

@@ -22,6 +22,9 @@ pub enum PipelineError {
     #[error("JPEG encoding failed: {0}")]
     Encode(String),
 
+    #[error("This edit uses a look that is missing: {0}")]
+    Look(String),
+
     #[error("The saved edit file {path} can't be used: {detail}")]
     Sidecar { path: PathBuf, detail: String },
 }

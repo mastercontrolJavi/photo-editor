@@ -1,6 +1,6 @@
-# Milestone 1: test results and verification gaps
+# Test results and verification gaps
 
-Recorded on 2026-11-22. The test machine had:
+First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11-23. The test machine had:
 
 * Windows 11 Home 10.0.26300
 * Intel Core Ultra 7 155H (16 cores / 22 threads), 15.6 GB RAM
@@ -11,13 +11,61 @@ Recorded on 2026-11-22. The test machine had:
 | Area | Status |
 |---|---|
 | Build and launch on Windows | **Passed.** Release build, launched 5 times, opened files, closed cleanly. |
-| Pipeline: decode, adjust, preview, export, edit files | **Passed.** 38 automated tests on generated DNGs and synthetic gain maps / tone curves. |
+| Pipeline: decode, adjust, preview, export, edit files | **Passed.** 83 automated tests (see "Lightroom-style controls" below for what the new ones cover). |
+| Tone, colour, effects, crop, presets (added 2026-11-23) | **Built and tested by program.** Checked by eye on contact sheets of real photos. Not yet used by a person. |
 | Preview vs export agreement | **Passed.** Within the tolerances documented below. |
 | Real iPhone ProRAW files (iPhone 15 Pro, 7 files) | **Opens, exports, orientation and source-safety passed.** Default rendering now matches Apple's within 0.3 EV on all 7 (fixed 2026-11-23, see below). |
 | Comparing against Apple's own rendering | **Passed numerically** against the rendering embedded in each DNG. Javier's own reference edits are still pending. |
 | Clicking through the app by hand | **Pending.** Javier to run the checklist at the end of this file. |
 
-The automated tests use generic DNGs built by the test code. Real-file results are in the next section.
+The automated tests use generic DNGs built by the test code. Real-file results are in the sections below.
+
+## Lightroom-style controls (2026-11-23)
+
+Added: Contrast, Highlights, Shadows, Whites, Blacks, point curves, Vibrance, Saturation, B&W, Color Mixer, B&W Mixer, Color Grading, Clarity, Dehaze, Vignette, Grain, `.cube` LUTs, crop / straighten / rotate / flip, presets (12 starter presets, Lightroom `.xmp` / `.lrtemplate` import, saving your own), and undo / redo.
+
+**These sliders are modelled on Lightroom's, not copied from it.** Adobe's maths is not public. Names, ranges and direction match; the exact result for a given number does not.
+
+### What was verified
+
+| Check | Result |
+|---|---|
+| Automated tests | **83 passed, 0 failed** (64 pipeline unit, 9 end-to-end, 10 app). |
+| Each slider does what its name says | Tested: Contrast pivots on middle grey; Shadows / Highlights / Whites / Blacks act on their own range and never reverse the order of tones; Highlights recovers detail above sensor white; Saturation −100 and B&W give pure grey; the Color Mixer changes only its own colour; curves pass through their points without overshoot; Color Grading tints only the chosen range; Vignette darkens corners and not the centre; Grain keeps the average brightness. |
+| Clarity and Dehaze | Tested on synthetic stripes: both add local contrast when positive and remove it when negative. The edge-aware helper map keeps a 5-stop edge without a halo. |
+| Crop geometry | Tested: quarter turns and flips compose correctly, a crop follows the picture through a turn, straightening keeps the crop inside the photo, aspect presets give the largest crop of that shape. |
+| Crop in the export | Tested: the exported JPEG has the cropped size, pixels are exact for turns and plain crops, and the vignette sits in the same place in preview and export. |
+| Crop handles | Tested with simulated mouse drags: resizing from a corner, moving, ratio lock, stopping at the photo's edge, ignoring drags outside the rectangle. |
+| Curve editor | Tested with simulated mouse input: add a point, move it, remove it with a double-click; end points only slide along their edge. This found and fixed a bug where a quick grab added a second point. |
+| Preset import | Tested on a hand-written `.xmp` and `.lrtemplate` in Lightroom's format: every supported setting maps across, unsupported ones are reported, presets layer over the current edit and never change the crop. |
+| LUTs | Tested: `.cube` parsing, blending by Amount, clear errors for bad files, and an export that names a missing LUT fails with a message instead of silently ignoring it. |
+| Old edit files | Version 1 edit files (exposure, temperature, tint only) still load. |
+| Default rendering unchanged | `compare_apple` gives the same numbers as before on IMG_7303 and IMG_7040, so the new code does not alter a photo with no edits. |
+| By eye | Contact sheets of all 20 slider extremes and all 12 starter presets on IMG_7235 show no halos, banding or colour breaks at screen size. Screenshots of the Edit, Crop and Presets tabs are in `Downloads\ProRAW test results\app-screenshots`. |
+
+### Preview vs export with many sliders
+
+The same agreement test as below, with Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Vibrance, Saturation, Clarity, Dehaze, a curve, the Color Mixer, Color Grading and a vignette all active, stays within the documented tolerance (mean ≤ 1.0 level, 99th percentile ≤ 3.0 levels).
+
+### Speed with the new sliders (IMG_7303, 48 MP)
+
+| Preview size | No edit | One tone slider | Heavy edit (about 10 sliders, curve, grading, grain) |
+|---|---|---|---|
+| 2560 px (zoomed-in crop, or a very large window) | 15 ms | 47 ms | about 125 ms |
+| 1600 px (normal window, final picture) | 6 ms | 19 ms | about 50 ms |
+| 1000 px (while dragging a slider) | 2 ms | 7 ms | about 18 ms |
+
+* While a slider is being dragged the app renders one size smaller, then the full-size preview when the button is released.
+* The heavy-edit figures for 1600 and 1000 px are scaled from the measured 2560 px figure.
+* Full-size export of a heavy edit: about 1.1 s to render plus 0.85 s to encode at 48 MP.
+* This is slower than milestone 1's 6–11 ms. It is usable, but a heavy edit on a cropped photo will feel less than instant. Speeding up the tone step is on the list below.
+
+### Not verified
+
+* **Nobody has used the new controls by hand yet.** Slider dragging, the crop handles, preset clicks and the import dialog were exercised by program, not by a person.
+* **No real downloaded preset pack has been imported.** The importer was tested against Lightroom's file format as written by hand. Try a pack and check the import message.
+* **No real `.cube` file from the web has been tried.**
+* **How close each slider is to Lightroom** has not been measured. There is no Lightroom on this PC to compare with.
 
 ## Real iPhone ProRAW results (2026-11-22)
 
@@ -88,7 +136,7 @@ The side-by-side images, exports and screenshots are in `Downloads\ProRAW test r
 
 ## Automated tests
 
-Run: `cargo test --workspace --release -- --nocapture`. Result: **38 passed, 0 failed.**
+Run: `cargo test --workspace --release -- --nocapture`. Result: **83 passed, 0 failed.**
 
 What the tests cover:
 
@@ -201,6 +249,7 @@ Known effects on ProRAW:
 2. **Your reference edits:** compare a portrait and your own edits of these shots against our exports, for skin tone, highlights and shadows. No portrait was in this test set.
 3. ~~Speed on real files~~: done (see above).
 4. **Hands-on check in the app:**
+   0. New on 2026-11-23: try the Edit sliders, the curve, the Crop tab (drag corners, straighten, rotate), click a few starter presets, and import a downloaded Lightroom preset.
    1. Drag each slider. The preview should follow smoothly.
    2. Press `\` and the Before/After buttons.
    3. Ctrl+S, close the app, reopen the photo. The edit should come back.
@@ -212,11 +261,15 @@ Known effects on ProRAW:
 ## Next release, in priority order
 
 1. ~~**ProRAW rendering fidelity.**~~ Done on 2026-11-23: every mid-tone gap is now within 0.3 EV of Apple's. Still open: ProfileGainTableMap2 for newer files, and semantic masks.
-2. **Basic tone controls.** Contrast, highlights, shadows, whites and blacks, plus a soft highlight roll-off.
-3. **Crop and rotate.** Includes straighten and aspect presets. Stored in the edit file.
-4. **Folder browsing with thumbnails.** Use the DNG's embedded preview for speed.
-5. **Copy/paste edits and app-native presets.** Reuse a look across a shoot.
-6. **Batch JPEG export.** Uses the existing export path, with a progress bar and cancel.
-7. **Curves and per-colour (HSL) adjustments.**
-8. **TIFF and HEIC input.** Only after testing real iPhone samples. HEIC decoding needs a codec choice.
-9. **DJI Pocket 3 compatibility check.**
+2. ~~**Basic tone controls.**~~ Done on 2026-11-23, with curves, Color Mixer, Color Grading, Clarity, Dehaze, Vignette and Grain.
+3. ~~**Crop and rotate.**~~ Done on 2026-11-23.
+4. **Detail and optics.** Texture, Sharpening, Noise Reduction, lens corrections from the DNG, chromatic aberration, Defringe. These need neighbourhood filters at full resolution.
+5. **Closer preset matching.** Calibration (colour primaries) and the parametric tone curve, which many downloaded presets use. Lightroom colour profiles / look tables where the preset embeds them.
+6. **Faster tone step.** Replace the per-pixel logarithms with look-up tables, aiming for a heavy edit under 50 ms at 2560 px.
+7. **Geometry, Point Color, Auto, zoom to 100 %.**
+8. **Folder browsing with thumbnails.** Use the DNG's embedded preview for speed.
+9. **Copy/paste edits and batch JPEG export.**
+10. **TIFF and HEIC input.** Only after testing real iPhone samples. HEIC decoding needs a codec choice.
+11. **DJI Pocket 3 compatibility check.**
+
+Not planned as-is: Lightroom's AI Denoise, Lens Blur and Adaptive presets. They rely on trained models. The DNG's own sky mask could support a simple "sky" adjustment later.

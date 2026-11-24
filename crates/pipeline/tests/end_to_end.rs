@@ -106,7 +106,7 @@ fn export_is_full_size_srgb_tagged_and_leaves_the_source_untouched() {
     let modified_before = std::fs::metadata(&src).unwrap().modified().unwrap();
 
     let d = decode_file(&src).unwrap();
-    let adj = Adjustments { exposure: 0.5, temperature: 20.0, tint: -10.0 };
+    let adj = Adjustments { exposure: 0.5, temperature: 20.0, tint: -10.0, ..Default::default() };
     sidecar::save(&src, &adj).unwrap();
     let opts = ExportOptions::next_to(&src);
     let first = export_jpeg(&src, &d, &adj, &opts).unwrap();
@@ -123,6 +123,30 @@ fn export_is_full_size_srgb_tagged_and_leaves_the_source_untouched() {
     assert_eq!(sidecar::load(&src).unwrap(), Some(adj), "edit restored on reopen");
 }
 
+#[test]
+fn export_applies_the_crop_and_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = write_fixture(dir.path(), "crop.dng", &FixtureSpec::new(600, 400, FixtureKind::Linear));
+    let d = decode_file(&src).unwrap();
+    let mut adj = Adjustments::default();
+    adj.crop.set_aspect(1.0, 600.0, 400.0);
+    adj.crop.rotate_cw();
+    let out = export_jpeg(&src, &d, &adj, &ExportOptions::next_to(&src)).unwrap();
+    assert_eq!(read_jpeg(&out).0.dimensions(), (400, 400));
+    // Straightening keeps the shape and trims the corners.
+    let mut adj = Adjustments::default();
+    adj.crop.angle = 8.0;
+    adj.crop.fit(600.0, 400.0);
+    let out = export_jpeg(&src, &d, &adj, &ExportOptions::next_to(&src)).unwrap();
+    let (w, h) = read_jpeg(&out).0.dimensions();
+    assert!(w < 600 && h < 400 && ((w as f64 / h as f64) - 1.5).abs() < 0.01, "{w} x {h}");
+    // An edit that names a look-up table that isn't installed fails clearly.
+    let lut = pipeline::adjust::LutUse { name: "not-installed-5c1e.cube".into(), amount: 100.0 };
+    let adj = Adjustments { lut: Some(lut), ..Default::default() };
+    let err = export_jpeg(&src, &d, &adj, &ExportOptions::next_to(&src)).unwrap_err();
+    assert!(matches!(err, PipelineError::Look(_)), "{err}");
+}
+
 /// Downscale an 8-bit sRGB image by area-averaging in linear light (the same
 /// thing the preview does before encoding).
 fn downscale_srgb(img: &image::RgbImage, w: usize, h: usize) -> Vec<[f32; 3]> {
@@ -132,6 +156,29 @@ fn downscale_srgb(img: &image::RgbImage, w: usize, h: usize) -> Vec<[f32; 3]> {
         img.pixels().map(|p| [0, 1, 2].map(|c| srgb_decode(p[c] as f32 / 255.0))).collect(),
     );
     lin.resize_box(w, h).pixels.iter().map(|p| p.map(|v| srgb_encode(v) * 255.0)).collect()
+}
+
+/// Most sliders in use together (no grain: it is random by design).
+fn everything_at_once() -> Adjustments {
+    let mut a = Adjustments {
+        exposure: 0.3,
+        contrast: 25.0,
+        highlights: -40.0,
+        shadows: 35.0,
+        whites: 10.0,
+        blacks: -10.0,
+        vibrance: 20.0,
+        saturation: -8.0,
+        clarity: 30.0,
+        dehaze: 15.0,
+        ..Default::default()
+    };
+    a.curve.rgb = vec![[0.0, 0.05], [0.5, 0.52], [1.0, 0.97]];
+    a.mixer[5].saturation = 30.0;
+    a.mixer[1].luminance = 10.0;
+    a.grading.shadows = pipeline::adjust::Wheel { hue: 210.0, saturation: 30.0, luminance: 0.0 };
+    a.vignette.amount = -30.0;
+    a
 }
 
 #[test]
@@ -146,8 +193,9 @@ fn preview_agrees_with_export_scaled_to_preview_size() {
     let d = decode_file(&src).unwrap();
     for adj in [
         Adjustments::default(),
-        Adjustments { exposure: 1.2, temperature: 35.0, tint: 15.0 },
-        Adjustments { exposure: -0.8, temperature: -60.0, tint: -25.0 },
+        Adjustments { exposure: 1.2, temperature: 35.0, tint: 15.0, ..Default::default() },
+        Adjustments { exposure: -0.8, temperature: -60.0, tint: -25.0, ..Default::default() },
+        everything_at_once(),
     ] {
         let preview_src = d.image.downscale_to_fit(400);
         let preview = render_srgb8(&preview_src, &adj, &d.info.look());

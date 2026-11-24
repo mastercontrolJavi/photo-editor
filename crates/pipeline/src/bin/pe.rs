@@ -5,6 +5,8 @@
 //!   pe export <photo> [options]    render a JPEG without opening the app
 //!       --out <folder>   (default: <photo folder>\Exported)
 //!       --exposure <EV> --temperature <n> --tint <n>   (default: saved edit)
+//!       --preset <name or file>   apply a starter preset, or a .xmp / .lrtemplate file
+//!   pe presets                     list the starter presets
 //!   pe fixtures <folder> [--large] write synthetic test DNGs (--large: 12 MP + 48 MP)
 
 use std::path::{Path, PathBuf};
@@ -12,7 +14,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use pipeline::fixtures::{make_dng, test_scene, FixtureKind, FixtureSpec};
-use pipeline::{decode_file, export_jpeg, render_srgb8, sidecar, Adjustments, ExportOptions, PREVIEW_LONG_EDGE};
+use pipeline::{decode_file, export_jpeg, render, sidecar, Adjustments, ExportOptions, Scene, View, PREVIEW_LONG_EDGE};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -23,8 +25,14 @@ fn main() -> ExitCode {
         }),
         Some("bench") => with_path(&args, bench),
         Some("export") => with_path(&args, |p| export(p, &args[2..])),
+        Some("presets") => {
+            for p in pipeline::preset::builtin() {
+                println!("{:<24} {}", p.group, p.name);
+            }
+            Ok(())
+        }
         Some("fixtures") => with_path(&args, |p| fixtures(p, args.iter().any(|a| a == "--large"))),
-        _ => Err(include_str!("pe.rs").lines().skip(1).take(8).map(|l| l.trim_start_matches("//!")).collect::<Vec<_>>().join("\n")),
+        _ => Err(include_str!("pe.rs").lines().skip(1).take(10).map(|l| l.trim_start_matches("//!")).collect::<Vec<_>>().join("\n")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -47,19 +55,34 @@ fn bench(path: &Path) -> Result<(), String> {
     let t = Instant::now();
     let preview = d.image.downscale_to_fit(PREVIEW_LONG_EDGE);
     let scale_ms = t.elapsed().as_secs_f64() * 1000.0;
-    let adj = Adjustments { exposure: 0.3, temperature: 10.0, tint: -5.0 };
-    let runs = 20;
-    let mut times: Vec<f64> = (0..runs)
-        .map(|i| {
-            let a = Adjustments { exposure: adj.exposure + i as f32 * 0.01, ..adj };
-            let t = Instant::now();
-            let _ = render_srgb8(&preview, &a, &d.info.look());
-            t.elapsed().as_secs_f64() * 1000.0
-        })
-        .collect();
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let look = d.info.look();
+    let (fw, fh) = (d.image.width, d.image.height);
+    let time_preview = |adj: &Adjustments| {
+        let runs = 20;
+        let scene = Scene { image: &preview, look: &look, lut: None };
+        let view = View::preview(&adj.crop, preview.width, preview.height, fw, fh);
+        let mut times: Vec<f64> = (0..runs)
+            .map(|i| {
+                let a = Adjustments { exposure: adj.exposure + i as f32 * 0.01, ..adj.clone() };
+                let t = Instant::now();
+                let _ = render(&scene, &a, &view, preview.width, preview.height);
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (times[runs / 2], times[runs - 1])
+    };
+    let light = Adjustments { exposure: 0.3, temperature: 10.0, tint: -5.0, ..Default::default() };
+    // Nearly every slider in use at once: the slowest realistic case.
+    let mut heavy =
+        pipeline::preset::builtin().into_iter().find(|p| p.name == "Soft Film").expect("starter preset").apply(&light);
+    heavy.clarity = 30.0;
+    heavy.dehaze = 20.0;
+    heavy.mixer[5].saturation = 20.0;
+    let (light_med, light_worst) = time_preview(&light);
+    let (heavy_med, heavy_worst) = time_preview(&heavy);
     let t = Instant::now();
-    let full = render_srgb8(&d.image, &adj, &d.info.look());
+    let full = pipeline::export::render_full(&d, &heavy, None);
     let render_full_ms = t.elapsed().as_secs_f64() * 1000.0;
     let t = Instant::now();
     let jpeg = pipeline::export::encode_jpeg(&full, pipeline::export::DEFAULT_QUALITY).map_err(|e| e.to_string())?;
@@ -69,11 +92,8 @@ fn bench(path: &Path) -> Result<(), String> {
     println!("Full size: {} x {}  |  preview: {} x {}", d.image.width, d.image.height, preview.width, preview.height);
     println!("Decode (open file):           {decode_ms:8.1} ms");
     println!("Build preview (once per file): {scale_ms:8.1} ms");
-    println!(
-        "Preview re-render per slider move: median {:.1} ms, worst {:.1} ms ({runs} runs)",
-        times[runs / 2],
-        times[runs - 1]
-    );
+    println!("Preview re-render, light edit: median {light_med:.1} ms, worst {light_worst:.1} ms");
+    println!("Preview re-render, heavy edit: median {heavy_med:.1} ms, worst {heavy_worst:.1} ms");
     println!("Export render (full size):    {render_full_ms:8.1} ms");
     println!("Export JPEG encode:           {encode_ms:8.1} ms ({:.1} MB)", jpeg.len() as f64 / 1e6);
     Ok(())
@@ -90,13 +110,33 @@ fn export(path: &Path, rest: &[String]) -> Result<(), String> {
             "--exposure" => adj.exposure = val()?.parse().map_err(|_| "bad --exposure")?,
             "--temperature" => adj.temperature = val()?.parse().map_err(|_| "bad --temperature")?,
             "--tint" => adj.tint = val()?.parse().map_err(|_| "bad --tint")?,
+            "--preset" => adj = find_preset(val()?)?.apply(&adj),
             other => return Err(format!("unknown option {other}")),
         }
     }
     let d = decode_file(path).map_err(|e| e.to_string())?;
     let out = export_jpeg(path, &d, &adj, &opts).map_err(|e| e.to_string())?;
-    println!("Wrote {} ({} x {})", out.display(), d.image.width, d.image.height);
+    let (w, h) = adj.crop.output_size(d.image.width, d.image.height);
+    println!("Wrote {} ({w} x {h})", out.display());
     Ok(())
+}
+
+fn find_preset(name: &str) -> Result<pipeline::Preset, String> {
+    if let Some(p) = pipeline::preset::builtin().into_iter().find(|p| p.name.eq_ignore_ascii_case(name)) {
+        return Ok(p);
+    }
+    let path = Path::new(name);
+    let text = std::fs::read_to_string(path).map_err(|_| format!("no starter preset or readable file called {name}"))?;
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let preset = if name.to_ascii_lowercase().ends_with(".lrtemplate") {
+        pipeline::preset::from_lrtemplate(&text, &stem)
+    } else {
+        pipeline::preset::from_xmp(&text, &stem)
+    }?;
+    if !preset.unsupported.is_empty() {
+        eprintln!("Not applied (unsupported): {}", preset.unsupported.join(", "));
+    }
+    Ok(preset)
 }
 
 fn fixtures(dir: &Path, large: bool) -> Result<(), String> {

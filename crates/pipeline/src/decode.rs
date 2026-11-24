@@ -19,6 +19,7 @@ use rawler::rawsource::RawSource;
 use crate::color::{self, Mat3};
 use crate::error::{PipelineError, Result};
 use crate::image::LinearImage;
+use crate::local::LocalMaps;
 use crate::look::{GainTableMap, Look, ToneCurve};
 use crate::probe::{self, TagReport};
 
@@ -49,6 +50,8 @@ pub struct SourceInfo {
     pub tone_curve: Option<Arc<ToneCurve>>,
     /// Whether the file's local tone map (ProfileGainTableMap) was applied at decode.
     pub gain_map_applied: bool,
+    /// Helper maps for the local sliders, worked out once from the decoded photo.
+    pub local: Arc<LocalMaps>,
     pub tags: TagReport,
     /// Plain-language limitations for this particular file, shown in the app.
     pub notes: Vec<String>,
@@ -57,7 +60,7 @@ pub struct SourceInfo {
 impl SourceInfo {
     /// Everything the renderer needs from the file.
     pub fn look(&self) -> Look {
-        Look { baseline_exposure: self.baseline_exposure, tone_curve: self.tone_curve.clone() }
+        Look { baseline_exposure: self.baseline_exposure, tone_curve: self.tone_curve.clone(), local: Some(self.local.clone()) }
     }
 }
 
@@ -218,6 +221,7 @@ fn decode_source(src: &RawSource) -> Result<DecodedImage> {
         notes.push("The file's tone curve couldn't be read; using a plain linear rendering.".into());
     }
     let image = image.oriented(orientation);
+    let local = Arc::new(LocalMaps::compute(&image));
 
     notes.extend(tags.limitations());
     let info = SourceInfo {
@@ -230,6 +234,7 @@ fn decode_source(src: &RawSource) -> Result<DecodedImage> {
         baseline_exposure,
         tone_curve,
         gain_map_applied,
+        local,
         tags,
         notes,
     };

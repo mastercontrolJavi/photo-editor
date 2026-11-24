@@ -9,9 +9,14 @@ use std::thread;
 use std::time::Instant;
 
 use pipeline::{
-    decode_file, export_jpeg, render_srgb8, sidecar, Adjustments, DecodedImage, ExportOptions, LinearImage, Look,
-    RenderedImage, PREVIEW_LONG_EDGE,
+    decode_file, export_jpeg, render, render_srgb8, sidecar, Adjustments, DecodedImage, ExportOptions, LinearImage, Look,
+    Lut3D, RenderedImage, Scene, View, PREVIEW_LONG_EDGE,
 };
+
+/// Preview sizes kept for each photo (long edge, largest first). The app
+/// renders the smallest one that still fills the space the photo is shown in,
+/// which keeps sliders quick in a normal-sized window.
+pub const PREVIEW_EDGES: [usize; 3] = [PREVIEW_LONG_EDGE, 1600, 1000];
 
 pub enum Msg {
     Loaded(Box<Loaded>),
@@ -24,7 +29,8 @@ pub struct Loaded {
     pub generation: u64,
     pub path: PathBuf,
     pub decoded: DecodedImage,
-    pub preview: Arc<LinearImage>,
+    /// Downscaled copies of the photo, matching [`PREVIEW_EDGES`].
+    pub previews: Vec<Arc<LinearImage>>,
     /// The photo rendered with no edits, for the Before view.
     pub before: RenderedImage,
     /// The saved edit, if any (or why it couldn't be read).
@@ -32,18 +38,21 @@ pub struct Loaded {
     pub decode_ms: f64,
 }
 
-struct RenderJob {
-    generation: u64,
-    revision: u64,
-    preview: Arc<LinearImage>,
-    adjustments: Adjustments,
-    look: Look,
+pub struct RenderRequest {
+    pub generation: u64,
+    pub revision: u64,
+    pub preview: Arc<LinearImage>,
+    /// Size of the full photo, so the crop and grain scale correctly.
+    pub full_size: (usize, usize),
+    pub adjustments: Adjustments,
+    pub look: Look,
+    pub lut: Option<Arc<Lut3D>>,
 }
 
 struct Shared {
     /// Only the newest preview request is kept: dragging a slider fast skips
     /// the in-between frames instead of queueing them.
-    slot: Mutex<Option<RenderJob>>,
+    slot: Mutex<Option<RenderRequest>>,
     wake: Condvar,
     quit: AtomicBool,
 }
@@ -75,7 +84,7 @@ impl Engine {
         self.rx.try_iter().collect()
     }
 
-    /// Decode a file, build its preview and read its saved edit, off the UI thread.
+    /// Decode a file, build its previews and read its saved edit, off the UI thread.
     pub fn open(&self, generation: u64, path: PathBuf) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
@@ -85,10 +94,15 @@ impl Engine {
                 Err(e) => Msg::LoadFailed { generation, path, error: e.to_string() },
                 Ok(decoded) => {
                     let decode_ms = started.elapsed().as_secs_f64() * 1000.0;
-                    let preview = Arc::new(decoded.image.downscale_to_fit(PREVIEW_LONG_EDGE));
-                    let before = render_srgb8(&preview, &Adjustments::default(), &decoded.info.look());
+                    let mut previews: Vec<Arc<LinearImage>> = Vec::new();
+                    for edge in PREVIEW_EDGES {
+                        // Each smaller copy is made from the one before it.
+                        let from = previews.last().map(|p| p.as_ref()).unwrap_or(decoded.image.as_ref());
+                        previews.push(Arc::new(from.downscale_to_fit(edge)));
+                    }
+                    let before = render_srgb8(&previews[0], &Adjustments::default(), &decoded.info.look());
                     let saved = sidecar::load(&path).map_err(|e| e.to_string());
-                    Msg::Loaded(Box::new(Loaded { generation, path, decoded, preview, before, saved, decode_ms }))
+                    Msg::Loaded(Box::new(Loaded { generation, path, decoded, previews, before, saved, decode_ms }))
                 }
             };
             let _ = tx.send(msg);
@@ -96,15 +110,8 @@ impl Engine {
         });
     }
 
-    pub fn request_render(
-        &self,
-        generation: u64,
-        revision: u64,
-        preview: Arc<LinearImage>,
-        adjustments: Adjustments,
-        look: Look,
-    ) {
-        *self.shared.slot.lock().unwrap() = Some(RenderJob { generation, revision, preview, adjustments, look });
+    pub fn request_render(&self, request: RenderRequest) {
+        *self.shared.slot.lock().unwrap() = Some(request);
         self.shared.wake.notify_one();
     }
 
@@ -144,7 +151,11 @@ fn render_loop(shared: Arc<Shared>, tx: Sender<Msg>, ctx: eframe::egui::Context)
             }
         };
         let started = Instant::now();
-        let image = render_srgb8(&job.preview, &job.adjustments, &job.look);
+        let (w, h) = (job.preview.width, job.preview.height);
+        let scene = Scene { image: &job.preview, look: &job.look, lut: job.lut.as_deref() };
+        // The whole photo is rendered; the crop is applied when it is drawn.
+        let view = View::preview(&job.adjustments.crop, w, h, job.full_size.0, job.full_size.1);
+        let image = render(&scene, &job.adjustments, &view, w, h);
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         if tx.send(Msg::Rendered { generation: job.generation, revision: job.revision, image, ms }).is_err() {
             return;

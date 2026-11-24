@@ -21,7 +21,7 @@ use crate::error::{PipelineError, Result};
 
 pub const SCHEMA: &str = "photo-editor/edit";
 /// Bump when the file layout changes; add a migration in [`load`].
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 pub const SUFFIX: &str = ".edit.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -59,7 +59,7 @@ pub fn save(source: &Path, adjustments: &Adjustments) -> Result<PathBuf> {
         schema: SCHEMA.into(),
         version: CURRENT_VERSION,
         source: SourceRef { file_name: source.file_name().unwrap_or_default().to_string_lossy().into_owned(), byte_len },
-        adjustments: adjustments.sanitized(),
+        adjustments: adjustments.clone().sanitized(),
         saved_at: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
     };
     let json = serde_json::to_vec_pretty(&doc).expect("edit file always serialises");
@@ -100,7 +100,8 @@ pub fn load(source: &Path) -> Result<Option<Adjustments>> {
     if version > CURRENT_VERSION {
         return Err(sidecar_err(&path, format!("saved by a newer version of the app (format v{version})")));
     }
-    // Migrations from older versions go here, e.g. `if version == 1 { ... }`.
+    // Version 1 files only had exposure, temperature and tint; every setting
+    // added since then simply takes its default when it is missing.
     let doc: EditFile = serde_json::from_value(value).map_err(|e| sidecar_err(&path, e.to_string()))?;
     Ok(Some(doc.adjustments.sanitized()))
 }
@@ -120,10 +121,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = photo(dir.path());
         assert_eq!(load(&src).unwrap(), None);
-        let adj = Adjustments { exposure: 0.75, temperature: -12.5, tint: 4.0 };
+        let mut adj = Adjustments { exposure: 0.75, temperature: -12.5, tint: 4.0, shadows: 30.0, bw: true, ..Default::default() };
+        adj.mixer[2].hue = -15.0;
+        adj.curve.rgb = vec![[0.0, 0.1], [1.0, 0.9]];
+        adj.crop.rotate_cw();
+        adj.lut = Some(crate::adjust::LutUse { name: "Teal.cube".into(), amount: 60.0 });
         let path = save(&src, &adj).unwrap();
         assert_eq!(path.file_name().unwrap(), "IMG_0001.DNG.edit.json");
-        assert_eq!(load(&src).unwrap(), Some(adj));
+        assert_eq!(load(&src).unwrap(), Some(adj.clone()));
         // Saving again replaces, doesn't append, and leaves no temp file.
         let adj2 = Adjustments { exposure: -1.0, ..adj };
         save(&src, &adj2).unwrap();
@@ -139,7 +144,7 @@ mod tests {
         save(&src, &adj).unwrap();
         // Simulate a crash mid-save: a half-written temp file is left behind.
         fs::write(dir.path().join("IMG_0001.DNG.edit.json.tmp"), b"{\"schema\": \"photo-ed").unwrap();
-        assert_eq!(load(&src).unwrap(), Some(adj));
+        assert_eq!(load(&src).unwrap(), Some(adj.clone()));
         // The next save still works and overwrites the stale temp file.
         save(&src, &Adjustments::default()).unwrap();
         assert_eq!(load(&src).unwrap(), Some(Adjustments::default()));

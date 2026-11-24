@@ -172,6 +172,45 @@ pub fn white_balance_matrix(temperature: f32, tint: f32) -> Mat3 {
     mul(&xyz_to_srgb(), &mul(&adapt_xyz, &SRGB_TO_XYZ))
 }
 
+// ---------------------------------------------------------------- fast maths
+
+/// log2 for positive, finite numbers, accurate to about 1e-6. Several times
+/// faster than the system maths library, which matters when it runs for every
+/// pixel on every slider move.
+#[inline(always)]
+pub fn fast_log2(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let e = ((bits >> 23) & 0xFF) as i32 - 127;
+    let m = f32::from_bits((bits & 0x007F_FFFF) | 0x3F80_0000); // 1 ≤ m < 2
+    // Fold the top half of the range down to √½…√2, without a branch (this
+    // test goes either way about equally often, so a branch would be slow).
+    let upper = (m > std::f32::consts::SQRT_2) as i32;
+    let m = m * (1.0 - 0.5 * upper as f32);
+    let e = e + upper;
+    // log2(m) = 2/ln2 · atanh(s), s = (m−1)/(m+1), |s| ≤ 0.172
+    let s = (m - 1.0) / (m + 1.0);
+    let s2 = s * s;
+    e as f32 + s * (2.885_39 + s2 * (0.961_796_7 + s2 * (0.577_078 + s2 * 0.412_198_6)))
+}
+
+/// 2^x, accurate to about 2e-5 (relative) and continuous. See [`fast_log2`].
+#[inline(always)]
+pub fn fast_exp2(x: f32) -> f32 {
+    let x = if x.is_nan() { 0.0 } else { x.clamp(-100.0, 100.0) };
+    let whole = x as i32 - (x < 0.0) as i32;
+    let f = x - whole as f32; // 0 ≤ f ≤ 1
+    let p = 1.0
+        + f * (std::f32::consts::LN_2
+            + f * (0.240_226_5 + f * (0.055_504_11 + f * (0.009_618_13 + f * (0.001_333_36 + f * 0.000_170_7)))));
+    f32::from_bits(((whole + 127) as u32) << 23) * p
+}
+
+/// base^exponent for a positive base.
+#[inline(always)]
+pub fn fast_pow(base: f32, exponent: f32) -> f32 {
+    fast_exp2(exponent * fast_log2(base))
+}
+
 // ---------------------------------------------------------------- sRGB transfer
 
 /// sRGB opto-electronic transfer function (linear → encoded), IEC 61966-2-1.
@@ -192,6 +231,24 @@ mod tests {
 
     fn close(a: Mat3, b: Mat3, tol: f32) -> bool {
         a.iter().flatten().zip(b.iter().flatten()).all(|(x, y)| (x - y).abs() < tol)
+    }
+
+    #[test]
+    fn fast_maths_matches_the_exact_functions() {
+        let mut x = 1e-6f32;
+        while x < 1e4 {
+            assert!((fast_log2(x) - x.log2()).abs() < 2e-5, "log2({x}): {} vs {}", fast_log2(x), x.log2());
+            x *= 1.013;
+        }
+        let mut e = -20.0f32;
+        while e < 20.0 {
+            let (fast, exact) = (fast_exp2(e), e.exp2());
+            assert!((fast / exact - 1.0).abs() < 5e-5, "exp2({e}): {fast} vs {exact}");
+            e += 0.0137;
+        }
+        assert_eq!(fast_exp2(0.0), 1.0);
+        assert_eq!(fast_exp2(f32::NAN), 1.0);
+        assert!((fast_pow(0.5, 2.2) - 0.5f32.powf(2.2)).abs() < 1e-5);
     }
 
     #[test]

@@ -23,9 +23,13 @@ pub mod decode;
 pub mod error;
 pub mod export;
 pub mod fixtures;
+pub mod geometry;
 pub mod icc;
 pub mod image;
+pub mod local;
 pub mod look;
+pub mod lut;
+pub mod preset;
 pub mod probe;
 pub mod render;
 pub mod sidecar;
@@ -34,9 +38,12 @@ pub use adjust::Adjustments;
 pub use decode::{decode_file, DecodedImage, SourceInfo};
 pub use error::PipelineError;
 pub use export::{export_jpeg, ExportOptions};
+pub use geometry::Crop;
 pub use image::LinearImage;
 pub use look::{GainTableMap, Look, ToneCurve};
-pub use render::{render_srgb8, RenderedImage};
+pub use lut::Lut3D;
+pub use preset::Preset;
+pub use render::{render, render_srgb8, RenderedImage, Scene, View};
 
 /// Longest edge, in pixels, of the cached preview image.
 pub const PREVIEW_LONG_EDGE: usize = 2560;

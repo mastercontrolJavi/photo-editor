@@ -13,6 +13,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::image::LinearImage;
+use crate::local::LocalMaps;
 
 /// Rendering inputs that come from the file rather than from the user's sliders.
 #[derive(Debug, Clone, Default)]
@@ -21,6 +22,8 @@ pub struct Look {
     pub baseline_exposure: f32,
     /// The file's default tone curve, if it has one.
     pub tone_curve: Option<Arc<ToneCurve>>,
+    /// Helper maps for the local sliders (Shadows, Highlights, Clarity, Dehaze).
+    pub local: Option<Arc<LocalMaps>>,
 }
 
 impl Look {
@@ -30,7 +33,7 @@ impl Look {
     }
 
     pub fn with_exposure(baseline_exposure: f32) -> Self {
-        Look { baseline_exposure, tone_curve: None }
+        Look { baseline_exposure, ..Self::default() }
     }
 }
 
