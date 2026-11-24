@@ -17,8 +17,8 @@ First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11
 | Tone, colour, effects, crop, presets (added 2026-11-23) | **Built and tested by program.** Checked by eye on contact sheets of real photos. Not yet used by a person. |
 | Preview vs export agreement | **Passed.** Within the tolerances documented below. |
 | Real iPhone ProRAW files (iPhone 15 Pro, 7 files) | **Opens, exports, orientation and source-safety passed.** Default rendering now matches Apple's within 0.3 EV on all 7 (fixed 2026-11-23, see below). |
-| Comparing against Apple's own rendering | **Passed numerically** against the rendering embedded in each DNG. Javier's own reference edits are still pending. |
-| Clicking through the app by hand | **Pending.** Javier to run the checklist at the end of this file. |
+| Comparing against Apple's own rendering | **Passed numerically** against the rendering embedded in each DNG. The owner's own reference edits are still pending. |
+| Clicking through the app by hand | **Pending.** The owner runs the checklist at the end of this file. |
 
 The automated tests use generic DNGs built by the test code. Real-file results are in the sections below.
 
@@ -327,7 +327,7 @@ Known effects on ProRAW:
 * The file's tone curve gives a gentle highlight roll-off, but there are no user tone controls yet. Lowering exposure brings back detail the sensor recorded.
 * The preview assumes an sRGB display. On a wide-gamut monitor without colour management, preview colours will look over-saturated. The exported JPEG is tagged correctly either way.
 
-## Still to verify (needs Javier's files and hands)
+## Still to verify (needs the owner's files and hands)
 
 1. **Other iPhones:** 15 Pro files pass. Still untested: a newer iPhone that may write JPEG XL, and older 12 MP-only models.
 2. **Your reference edits:** compare a portrait and your own edits of these shots against our exports, for skin tone, highlights and shadows. No portrait was in this test set.

@@ -1,13 +1,55 @@
-//! HEIC decoding through Windows' own image decoders (the Windows Imaging
-//! Component). The app bundles no HEIC decoder: it uses the one Windows
-//! provides when the HEIF and HEVC extensions are installed, as they are on
-//! most PCs. Nothing here goes online.
+//! HEIC decoding with the decoder each system already has. The app bundles
+//! no HEIC decoder of its own, and nothing here goes online.
+//!
+//! * **Windows:** the Windows Imaging Component, which decodes HEIC when the
+//!   HEIF and HEVC extensions are installed, as they are on most PCs.
+//! * **Mac:** `sips`, the image tool that is part of macOS, converts the photo
+//!   to PNG in a temporary folder, and that PNG is read like any other.
 
 use crate::rendered::Pixels;
 
-#[cfg(not(windows))]
+/// What to tell someone when HEIC can't be decoded on this system.
+pub(crate) const HELP: &str = if cfg!(windows) {
+    "HEIC needs Windows' \"HEIF Image Extensions\" and \"HEVC Video Extensions\" from the Microsoft Store."
+} else if cfg!(target_os = "macos") {
+    "The file may be damaged; macOS's own converter couldn't read it."
+} else {
+    "HEIC is supported on Windows and Mac only."
+};
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn decode(_bytes: &[u8]) -> Result<Pixels, String> {
-    Err("HEIC is only supported on Windows".into())
+    Err("no HEIC decoder on this system".into())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode(bytes: &[u8]) -> Result<Pixels, String> {
+    use std::process::Command;
+    // A private folder for the two temporary files, removed when this function returns.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let scratch = Scratch(std::env::temp_dir().join(format!("photo-editor-heic-{}-{unique}", std::process::id())));
+    std::fs::create_dir_all(&scratch.0).map_err(|e| format!("no temporary folder: {e}"))?;
+    let (input, output) = (scratch.0.join("in.heic"), scratch.0.join("out.png"));
+    std::fs::write(&input, bytes).map_err(|e| format!("couldn't write a temporary file: {e}"))?;
+    let run = Command::new("/usr/bin/sips")
+        .args(["-s", "format", "png"])
+        .arg(&input)
+        .arg("--out")
+        .arg(&output)
+        .output()
+        .map_err(|e| format!("couldn't run macOS's image converter: {e}"))?;
+    if !run.status.success() || !output.exists() {
+        return Err(format!("macOS's image converter refused it: {}", String::from_utf8_lossy(&run.stderr).trim()));
+    }
+    let png = std::fs::read(&output).map_err(|e| format!("couldn't read the converted picture: {e}"))?;
+    let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(png)).map_err(|e| e.to_string())?;
+    crate::rendered::pixels_from(decoder).map_err(|e| e.to_string())
 }
 
 #[cfg(windows)]

@@ -23,6 +23,39 @@ const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)
 const REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
 const REDO_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 
+/// The name of the shortcut key on this system, for hints: "Ctrl" or "Cmd".
+pub(crate) const MOD: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+
+/// Show a file in the system's file manager (Explorer or Finder), selected.
+pub(crate) fn reveal(path: &Path) {
+    let mut command = if cfg!(windows) {
+        let mut c = std::process::Command::new("explorer");
+        c.arg("/select,").arg(path);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    let _ = command.spawn();
+}
+
+/// Open a folder in the system's file manager.
+pub(crate) fn open_folder(dir: &Path) {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(program).arg(dir).spawn();
+}
+
 /// How many steps Undo remembers.
 const HISTORY_LIMIT: usize = 200;
 
@@ -206,7 +239,7 @@ impl EditorApp {
             loading: None,
             show_before: false,
             exporting: false,
-            status: "Ready. Open a photo to start (Ctrl+O), or drop one onto the window.".into(),
+            status: format!("Ready. Open a photo to start ({MOD}+O), or drop one onto the window."),
             status_is_error: false,
             last_export: None,
             sidecar_warning: None,
@@ -583,16 +616,16 @@ impl EditorApp {
             .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(12, 8)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    if ui.button("Open…").on_hover_text("Open a photo (Ctrl+O)").clicked() {
+                    if ui.button("Open…").on_hover_text(format!("Open a photo ({MOD}+O)")).clicked() {
                         self.request_open_dialog();
                     }
                     ui.add_space(8.0);
                     let (can_undo, can_redo) =
                         self.doc.as_ref().map(|d| (!d.undo.is_empty(), !d.redo.is_empty())).unwrap_or_default();
-                    if ui.add_enabled(can_undo, egui::Button::new("Undo")).on_hover_text("Ctrl+Z").clicked() {
+                    if ui.add_enabled(can_undo, egui::Button::new("Undo")).on_hover_text(format!("{MOD}+Z")).clicked() {
                         self.undo();
                     }
-                    if ui.add_enabled(can_redo, egui::Button::new("Redo")).on_hover_text("Ctrl+Y").clicked() {
+                    if ui.add_enabled(can_redo, egui::Button::new("Redo")).on_hover_text(format!("{MOD}+Y")).clicked() {
                         self.redo();
                     }
                     ui.add_space(8.0);
@@ -609,14 +642,14 @@ impl EditorApp {
                             .fill(theme::ACCENT);
                         if ui
                             .add_enabled(has_doc && !self.exporting, export)
-                            .on_hover_text("Full-size sRGB JPEG (Ctrl+E). Also saves the edit.")
+                            .on_hover_text(format!("Full-size sRGB JPEG ({MOD}+E). Also saves the edit."))
                             .clicked()
                         {
                             self.start_export();
                         }
                         let dirty = self.dirty();
                         let save_label = if dirty { "Save edit" } else { "Edit saved" };
-                        if ui.add_enabled(dirty, egui::Button::new(save_label)).on_hover_text("Ctrl+S").clicked() {
+                        if ui.add_enabled(dirty, egui::Button::new(save_label)).on_hover_text(format!("{MOD}+S")).clicked() {
                             self.save_edit();
                         }
                         ui.add_space(12.0);
@@ -659,7 +692,7 @@ impl EditorApp {
                     ui.label(RichText::new(&self.status).color(color).small());
                     if let Some(path) = self.last_export.clone() {
                         if ui.small_button("Show in folder").clicked() {
-                            let _ = std::process::Command::new("explorer").arg("/select,").arg(&path).spawn();
+                            reveal(&path);
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

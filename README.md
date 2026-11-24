@@ -1,9 +1,43 @@
 # Photo Editor
 
-An offline Windows photo editor, written in Rust. It was built for iPhone ProRAW and also opens JPEG, PNG and HEIC.
+An offline photo editor for Mac and Windows, written in Rust. It was built for iPhone ProRAW and also opens JPEG, PNG and HEIC.
 It needs no account, network connection or paid service.
 
 You open a photo, edit it with Lightroom-style controls, crop it, and export a full-size sRGB JPEG. Edits are saved beside the photo and never change it.
+
+## Download and install
+
+Get the newest version from the [Releases page](../../releases/latest).
+
+| Your computer | File to download |
+|---|---|
+| Mac (Apple Silicon or Intel, macOS 11 or newer) | `PhotoEditor-mac.dmg` |
+| Windows 10 or 11 | `PhotoEditor-windows.zip` |
+
+### Mac
+
+1. Open `PhotoEditor-mac.dmg` and drag **Photo Editor** onto **Applications**.
+2. Open **Photo Editor** from Applications. macOS says it can't check the app for malicious software. Click **Done**.
+3. Open **System Settings → Privacy & Security**, scroll down to the message about Photo Editor, and click **Open Anyway**. Confirm with your password or Touch ID.
+
+You do steps 2 and 3 only the first time. The warning appears because the app isn't signed with a paid Apple developer certificate. On macOS 14 or older you can instead right-click the app and choose **Open**.
+
+If you prefer the Terminal, this does the same as step 3:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Photo Editor.app"
+```
+
+### Windows
+
+1. Unzip `PhotoEditor-windows.zip` and double-click **Photo Editor.exe**. You can move it anywhere and pin it to Start or the taskbar.
+2. If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**. This appears because the app isn't signed with a paid certificate.
+
+### Then
+
+Click **Open…** or drop a photo onto the window. The sections below explain the controls.
+
+**About the Mac version:** it is built and tested automatically on GitHub's Mac machines, but it hasn't yet been used by a person on a real Mac. If something looks wrong, please say so.
 
 ### File types
 
@@ -13,7 +47,7 @@ The app works out the type from the file's contents, not its name.
 |---|---|
 | **RAW** (DNG, including iPhone ProRAW; other RAW formats the decoder knows) | The most room to edit: highlights and shadows the camera recorded can be brought back. Starts with Sharpening 40. |
 | **JPEG, PNG** | Every slider works. The picture is already processed and usually 8-bit, so blown highlights can't be recovered and big changes show banding sooner. Starts with Sharpening 0. |
-| **HEIC** (iPhone's default photo format) | Same as JPEG. Decoded by Windows' own HEIF/HEVC decoder, so it needs the "HEIF Image Extensions" and "HEVC Video Extensions" from the Microsoft Store if the PC doesn't have them (many do). |
+| **HEIC** (iPhone's default photo format) | Same as JPEG. The app uses the decoder each system already has. On a Mac that always works. On Windows it needs the "HEIF Image Extensions" and "HEVC Video Extensions" from the Microsoft Store if the PC doesn't have them (many do). |
 
 iPhone JPEG and HEIC photos store their colours as Display P3; the app converts them to sRGB for editing. Other colour profiles (Adobe RGB, ProPhoto) are not converted yet.
 
@@ -40,6 +74,8 @@ The Profile menu sets the photo's starting look, underneath the sliders, with an
 | Compare | **Before / After** buttons, or press `\` |
 | Save the edit | **Save edit** (Ctrl+S). It writes `IMG_0001.DNG.edit.json` next to the photo. |
 | Export | **Export JPEG** (Ctrl+E). It writes `Exported\IMG_0001.jpg` next to the photo. Export also saves the edit. |
+
+On a Mac, use **Cmd** wherever this page says Ctrl.
 
 ### What the Edit tab has
 
@@ -72,14 +108,22 @@ The slider names and ranges follow Lightroom's, but the maths behind them is thi
   The most common gap is a colour profile or look table embedded in the preset. Presets built mainly on one will look different from Lightroom.
 * Presets never change the crop. A Lightroom preset's white balance in Kelvin is skipped, so the photo keeps its as-shot balance.
 * **Save the current edit** stores your own preset under "Yours".
-* Imported and saved presets live in `%APPDATA%\Photo Editor\presets` (the Info tab has a button to open it).
+* Imported and saved presets live in `%APPDATA%\Photo Editor\presets` on Windows and `~/Library/Application Support/Photo Editor/presets` on a Mac (the Info tab has a button to open it).
 
 * The original photo is never written to.
 * Reopening a photo restores its saved edit.
 * Closing the app or opening another photo with unsaved changes asks you first.
 * If an export name is already taken, the file is saved as `IMG_0001-1.jpg`, `-2`, and so on. Nothing is ever overwritten.
 
-## Build and run on Windows
+## Building it yourself
+
+Most people should use the downloads above. These notes are for changing the code.
+
+**On a Mac:** install Rust from [rustup.rs](https://rustup.rs), then run `cargo run --release -p photo-editor`. To make the `.dmg`, run `bash packaging/macos/bundle.sh`.
+
+**Publishing a new version:** push a tag such as `v0.2.1`. GitHub then builds the Mac and Windows downloads and attaches them to a release (see `.github/workflows/release.yml`).
+
+### On Windows
 
 You need the Rust toolchain (stable, MSVC) and Visual Studio Build Tools with the "Desktop development with C++" workload.
 

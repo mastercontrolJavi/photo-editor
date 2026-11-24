@@ -1,0 +1,103 @@
+# Builds the downloads (Mac .dmg and Windows .zip) and attaches them to a
+# GitHub release. Runs when a version tag such as v0.2.0 is pushed, or by hand
+# from the Actions tab (which builds and tests without publishing anything).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Create the release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the release if this is a tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+          else
+            extra=""
+            case "$TAG" in *-rc*|*-test*) extra="--prerelease" ;; esac
+            gh release create "$TAG" --title "Photo Editor $TAG" --notes-file packaging/RELEASE_NOTES.md $extra
+          fi
+
+  mac:
+    name: Mac
+    needs: release
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust for both kinds of Mac
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Run the tests
+        run: cargo test --workspace --release
+      - name: Build the app and the disk image
+        run: bash packaging/macos/bundle.sh
+      - name: Launch the app and take a screenshot
+        continue-on-error: true
+        run: bash packaging/macos/smoke.sh
+      - name: Keep the build and the screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            dist/PhotoEditor-mac.dmg
+            dist/smoke/*.png
+            dist/smoke/*.txt
+          if-no-files-found: warn
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" dist/PhotoEditor-mac.dmg --clobber
+
+  windows:
+    name: Windows
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+      - name: Run the tests
+        run: cargo test --workspace --release
+      - name: Build the app
+        run: cargo build --release -p photo-editor
+      - name: Zip it
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\photo-editor.exe "dist\Photo Editor.exe"
+          Compress-Archive -Path "dist\Photo Editor.exe" -DestinationPath dist\PhotoEditor-windows.zip -Force
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/PhotoEditor-windows.zip
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$env:TAG" dist/PhotoEditor-windows.zip --clobber

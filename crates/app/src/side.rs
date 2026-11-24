@@ -486,7 +486,7 @@ impl EditorApp {
         }
         ui.add_space(6.0);
         ui.label(
-            RichText::new("Click a preset to apply it. Ctrl+Z undoes it. Right-click an imported preset to delete it. A * means part of the preset can't be applied yet; hover to see what.")
+            RichText::new(format!("Click a preset to apply it. {}+Z undoes it. Right-click an imported preset to delete it. A * means part of the preset can't be applied yet; hover to see what.", crate::app::MOD))
                 .color(theme::MUTED)
                 .small(),
         );
@@ -597,7 +597,7 @@ impl EditorApp {
         ui.add(egui::Label::new(RichText::new(dir.display().to_string()).small()).truncate()).on_hover_text(dir.display().to_string());
         if ui.small_button("Open folder").clicked() {
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+            crate::app::open_folder(&dir);
         }
     }
 }

@@ -95,15 +95,21 @@ fn unreadable(format: Format, detail: impl std::fmt::Display) -> PipelineError {
     PipelineError::Unreadable { detail: format!("this {} file can't be read: {detail}", format.name()) }
 }
 
-fn with_image_crate(format: Format, mut decoder: impl ImageDecoder) -> Result<Pixels> {
+fn with_image_crate(format: Format, decoder: impl ImageDecoder) -> Result<Pixels> {
     let (w, h) = decoder.dimensions();
     if (w as usize).saturating_mul(h as usize) > MAX_PIXELS {
         return Err(PipelineError::Unsupported { detail: format!("{w}×{h} is larger than the {} MP limit", MAX_PIXELS / 1_000_000) });
     }
+    pixels_from(decoder).map_err(|e| unreadable(format, e))
+}
+
+/// Read every pixel, the colour profile and the rotation tag from a decoder.
+pub(crate) fn pixels_from(mut decoder: impl ImageDecoder) -> image::ImageResult<Pixels> {
+    let (w, h) = decoder.dimensions();
     let icc = decoder.icc_profile().ok().flatten();
     let orientation = decoder.orientation().map(|o| o.to_exif() as u16).unwrap_or(1);
     let bits = (decoder.color_type().bits_per_pixel() / decoder.color_type().channel_count() as u16) as u8;
-    let img = DynamicImage::from_decoder(decoder).map_err(|e| unreadable(format, e))?;
+    let img = DynamicImage::from_decoder(decoder)?;
     Ok(Pixels { width: w as usize, height: h as usize, rgba: img.into_rgba16().into_raw(), bits, icc, orientation })
 }
 
@@ -118,9 +124,7 @@ fn read_pixels(format: Format, bytes: &[u8]) -> Result<Pixels> {
             with_image_crate(format, decoder)
         }
         Format::Heic => crate::wic::decode(bytes).map_err(|detail| PipelineError::Unsupported {
-            detail: format!(
-                "this HEIC photo couldn't be decoded ({detail}). HEIC needs Windows' \"HEIF Image Extensions\" and \"HEVC Video Extensions\" from the Microsoft Store."
-            ),
+            detail: format!("this HEIC photo couldn't be decoded ({detail}). {}", crate::wic::HELP),
         }),
     }
 }
@@ -262,6 +266,29 @@ mod tests {
         assert_eq!(colour_space(Some(b"sRGB IEC61966-2.1")), ColourSpace::Srgb);
         assert_eq!(colour_space(Some(b"Adobe RGB (1998)")), ColourSpace::Other);
         assert_eq!(colour_space(None), ColourSpace::Srgb);
+    }
+
+    /// On a Mac, make a real HEIC with the system's own converter and open it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_heic_opens_on_a_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let (png, heic) = (dir.path().join("in.png"), dir.path().join("out.heic"));
+        let img = RgbImage::from_fn(256, 192, |x, _| if x < 128 { Rgb([210, 60, 40]) } else { Rgb([40, 90, 200]) });
+        img.save(&png).unwrap();
+        let made = std::process::Command::new("/usr/bin/sips")
+            .args(["-s", "format", "heic"])
+            .arg(&png)
+            .arg("--out")
+            .arg(&heic)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "sips couldn't make a HEIC: {}", String::from_utf8_lossy(&made.stderr));
+        let d = decode(Format::Heic, &std::fs::read(&heic).unwrap()).unwrap();
+        assert_eq!((d.info.format.as_str(), d.image.width, d.image.height), ("HEIC", 256, 192));
+        let (left, right) = (d.image.get(40, 96), d.image.get(216, 96));
+        assert!(left[0] > left[2] * 2.0, "left side is red: {left:?}");
+        assert!(right[2] > right[0] * 2.0, "right side is blue: {right:?}");
     }
 
     #[test]
