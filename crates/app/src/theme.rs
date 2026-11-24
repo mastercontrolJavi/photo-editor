@@ -13,6 +13,10 @@ pub const WARN: Color32 = Color32::from_rgb(226, 178, 92);
 pub const ERROR: Color32 = Color32::from_rgb(232, 110, 100);
 
 pub fn apply(ctx: &egui::Context) {
+    // Always dark, whatever the computer's own light/dark setting is. Without
+    // this the app follows the system, and on a computer in light mode half
+    // of these colours would be applied over light-mode widgets.
+    ctx.set_theme(egui::ThemePreference::Dark);
     let mut style = (*ctx.global_style()).clone();
     style.visuals = egui::Visuals::dark();
     let v = &mut style.visuals;
@@ -41,5 +45,7 @@ pub fn apply(ctx: &egui::Context) {
     style.text_styles.insert(TextStyle::Button, FontId::proportional(14.0));
     style.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
     style.text_styles.insert(TextStyle::Heading, FontId::proportional(13.0));
-    ctx.set_global_style(style);
+    // The same look is stored for both themes, in case anything switches it later.
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
 }
