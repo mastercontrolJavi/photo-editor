@@ -44,6 +44,30 @@ fn main() {
     let mut a = d();
     a.grain.amount = 30.0;
     cases.push(("grain", a));
+    {
+        use pipeline::adjust::{BrushStroke, Geometry, LocalAdjust, Mask, MaskShape, PointColor, Spot};
+        let darker = LocalAdjust { exposure: -1.0, ..Default::default() };
+        let toned = LocalAdjust { exposure: -1.0, highlights: -40.0, shadows: 20.0, ..Default::default() };
+        let mut a = d();
+        a.masks.push(Mask { shape: MaskShape::Linear { from: [0.5, 0.1], to: [0.5, 0.5] }, invert: false, adjust: darker });
+        cases.push(("linear mask", a));
+        let mut a = d();
+        a.masks.push(Mask { shape: MaskShape::Radial { centre: [0.5, 0.5], radius: [0.3, 0.2], angle: 0.0, feather: 50.0 }, invert: true, adjust: toned });
+        cases.push(("radial mask + tone", a));
+        let mut a = d();
+        let stroke = BrushStroke { points: (0..200).map(|i| [0.1 + 0.004 * i as f32, 0.5 + 0.2 * (i as f32 * 0.1).sin()]).collect(), size: 0.04, feather: 60.0, erase: false };
+        a.masks.push(Mask { shape: MaskShape::Brush { strokes: vec![stroke] }, invert: false, adjust: darker });
+        cases.push(("brush mask", a));
+        let mut a = d();
+        a.point_colors.push(PointColor { hue: 50.0, saturation: 0.8, luminance: 0.4, hue_shift: 30.0, ..Default::default() });
+        cases.push(("point color", a));
+        let mut a = d();
+        a.geometry = Geometry { vertical: -30.0, rotate: 2.0, constrain: true, ..Default::default() };
+        cases.push(("geometry", a));
+        let mut a = d();
+        a.spots = (0..20).map(|i| Spot { at: [0.1 + 0.04 * i as f32, 0.5], source: [0.1 + 0.04 * i as f32, 0.6], radius: 0.01, ..Spot::default() }).collect();
+        cases.push(("20 heal spots", a));
+    }
     println!("{} x {}", preview.width, preview.height);
     for (name, adj) in &cases {
         let scene = Scene { image: &preview, look: &look, lut: None };

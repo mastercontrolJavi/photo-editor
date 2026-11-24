@@ -10,11 +10,13 @@ use eframe::egui::{
     self, Align, Color32, ColorImage, Id, Key, KeyboardShortcut, Layout, Margin, Modifiers, RichText, TextureFilter,
     TextureHandle, TextureOptions,
 };
+use pipeline::adjust::{Geometry, MaskShape};
 use pipeline::{preset, sidecar, Adjustments, Crop, DecodedImage, ExportOptions, LinearImage, Lut3D, Preset, RenderedImage};
 
 use crate::canvas::CropDrag;
 use crate::engine::{Engine, Loaded, Msg, Region, RenderRequest};
 use crate::theme;
+use crate::tools::{HealUi, MaskUi};
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
@@ -71,6 +73,8 @@ pub(crate) const TEX_OPTIONS: TextureOptions = TextureOptions {
 pub(crate) enum Tab {
     Edit,
     Crop,
+    Heal,
+    Mask,
     Presets,
     Info,
 }
@@ -119,10 +123,27 @@ pub(crate) struct Zoom {
     pub scale: Option<f32>,
     /// The point of the finished picture at the centre of the screen (0…1).
     pub centre: (f32, f32),
+    /// The scale that fits the whole picture, and the furthest zoom allowed
+    /// (both noted by the picture area each time it is drawn).
+    pub fit: f32,
+    pub most: f32,
+    /// The last scrolling came from a trackpad (which slides the picture) and
+    /// not from a mouse wheel (which zooms).
+    pub trackpad: bool,
 }
 
 impl Zoom {
-    pub const FIT: Zoom = Zoom { scale: None, centre: (0.5, 0.5) };
+    pub const FIT: Zoom = Zoom { scale: None, centre: (0.5, 0.5), fit: 0.25, most: 8.0, trackpad: false };
+
+    /// The zoom in use, as screen pixels per photo pixel.
+    pub fn current(&self) -> f32 {
+        self.scale.unwrap_or(self.fit)
+    }
+
+    /// Zoom to `scale` (at or below the fitted size means "fit").
+    pub fn set(&mut self, scale: f32) {
+        self.scale = (scale > self.fit * 1.002).then_some(scale.min(self.most));
+    }
 }
 
 /// What a preview request was for.
@@ -219,6 +240,16 @@ pub struct EditorApp {
     pub(crate) curve_channel: usize,
     pub(crate) mixer_tab: usize,
     pub(crate) preset_name: String,
+    /// Point Color: the next click on the photo picks a colour.
+    pub(crate) picking_colour: bool,
+    pub(crate) point_selected: usize,
+    pub(crate) mask_ui: MaskUi,
+    pub(crate) heal_ui: HealUi,
+    /// The red picture of the selected mask, and what it was made from.
+    pub(crate) mask_overlay: Option<((MaskShape, bool, Geometry), TextureHandle)>,
+    /// Select the first mask and healing spot of the first photo opened (the
+    /// `--select` option, for checking the app from a script).
+    select_first: bool,
 }
 
 pub(crate) fn file_name(p: &Path) -> String {
@@ -230,7 +261,7 @@ fn to_color_image(img: &RenderedImage) -> ColorImage {
 }
 
 impl EditorApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>, tab: Tab, start_zoomed: bool) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>, tab: Tab, start_zoomed: bool, select_first: bool) -> Self {
         theme::apply(&cc.egui_ctx);
         let mut app = Self {
             engine: Engine::new(cc.egui_ctx.clone()),
@@ -251,10 +282,16 @@ impl EditorApp {
             presets: Vec::new(),
             luts: HashMap::new(),
             pointer_down: false,
-            zoom: if start_zoomed { Zoom { scale: Some(1.0), centre: (0.5, 0.5) } } else { Zoom::FIT },
+            zoom: if start_zoomed { Zoom { scale: Some(1.0), ..Zoom::FIT } } else { Zoom::FIT },
             curve_channel: 0,
             mixer_tab: 1,
             preset_name: String::new(),
+            picking_colour: false,
+            point_selected: 0,
+            mask_ui: MaskUi::default(),
+            heal_ui: HealUi::default(),
+            mask_overlay: None,
+            select_first,
         };
         app.reload_presets();
         if let Some(p) = initial {
@@ -384,8 +421,9 @@ impl EditorApp {
             let shrink = if dragging { 2 } else { 1 };
             Region { out_w: (r.out_w / shrink).max(1), out_h: (r.out_h / shrink).max(1), ..r }
         });
-        if self.show_before && region.is_none() {
+        if self.show_before && region.is_none() && doc.adjustments.geometry.is_identity() {
             // The whole-photo "Before" picture was made when the photo opened.
+            // (With a Geometry warp it has to be rendered, to be framed the same way.)
             return;
         }
         let mut key = RenderKey { adjustments: adjustments.clone(), level, region };
@@ -432,6 +470,29 @@ impl EditorApp {
         doc.redo.push(std::mem::replace(&mut doc.adjustments, previous));
         doc.committed = doc.adjustments.clone();
         self.adjustments_changed();
+    }
+
+    /// Delete key: remove the selected healing spot or mask (in their own tabs).
+    pub(crate) fn delete_selected(&mut self) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        let a = &mut doc.adjustments;
+        match self.tab {
+            Tab::Heal => {
+                if let Some(i) = self.heal_ui.selected.filter(|i| *i < a.spots.len()) {
+                    a.spots.remove(i);
+                    self.heal_ui.selected = None;
+                    self.adjustments_changed();
+                }
+            }
+            Tab::Mask => {
+                if let Some(i) = self.mask_ui.selected.filter(|i| *i < a.masks.len()) {
+                    a.masks.remove(i);
+                    self.mask_ui.selected = None;
+                    self.adjustments_changed();
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn redo(&mut self) {
@@ -496,6 +557,11 @@ impl EditorApp {
         self.last_export = None;
         self.crop_ui.drag = None;
         self.crop_ui.straighten_from = None;
+        self.picking_colour = false;
+        self.point_selected = 0;
+        self.mask_ui = MaskUi { brush_size: self.mask_ui.brush_size, brush_feather: self.mask_ui.brush_feather, ..MaskUi::default() };
+        self.heal_ui = HealUi { selected: None, drag: None, ..std::mem::take(&mut self.heal_ui) };
+        self.mask_overlay = None;
         // The first photo keeps a zoom asked for on the command line; later ones start fitted.
         if self.doc.is_some() {
             self.zoom = Zoom::FIT;
@@ -547,6 +613,11 @@ impl EditorApp {
             decode_ms: l.decode_ms,
             export_dir,
         });
+        if std::mem::take(&mut self.select_first) {
+            let a = &self.doc.as_ref().expect("just set").adjustments;
+            self.mask_ui.selected = (!a.masks.is_empty()).then_some(0);
+            self.heal_ui.selected = (!a.spots.is_empty()).then_some(0);
+        }
         self.adjustments_changed();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} — Photo Editor",
@@ -591,6 +662,14 @@ impl EditorApp {
                 }
                 if self.tab == Tab::Crop && ctx.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)) {
                     self.tab = Tab::Edit;
+                }
+                if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                    // Put down whatever was waiting for a click on the photo.
+                    self.picking_colour = false;
+                    self.mask_ui.adding = None;
+                }
+                if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
+                    self.delete_selected();
                 }
             }
             let dropped = ctx
@@ -652,29 +731,53 @@ impl EditorApp {
                         if ui.add_enabled(dirty, egui::Button::new(save_label)).on_hover_text(format!("{MOD}+S")).clicked() {
                             self.save_edit();
                         }
-                        ui.add_space(12.0);
-                        let mut before_changed = false;
-                        ui.add_enabled_ui(has_doc, |ui| {
-                            before_changed |= ui
-                                .selectable_value(&mut self.show_before, false, "After")
-                                .on_hover_text("Your edit (press \\ to toggle)")
-                                .changed();
-                            before_changed |= ui
-                                .selectable_value(&mut self.show_before, true, "Before")
-                                .on_hover_text("The photo as shot (press \\ to toggle)")
-                                .changed();
-                        });
-                        if before_changed {
-                            self.adjustments_changed();
+                    });
+                });
+            });
+    }
+
+    /// The strip under the photo: zoom on the left, Before/After on the right.
+    fn view_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("view")
+            .exact_size(38.0)
+            .frame(egui::Frame::new().fill(theme::CANVAS).inner_margin(Margin::symmetric(12, 6)))
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let has_doc = self.doc.is_some();
+                    ui.add_enabled_ui(has_doc && (self.tab != Tab::Crop || self.show_before), |ui| {
+                        let zoom = &mut self.zoom;
+                        if ui.selectable_label(zoom.scale.is_none(), "Fit").on_hover_text("Whole picture (Z)").clicked() {
+                            zoom.scale = None;
                         }
-                        ui.add_space(12.0);
-                        ui.add_enabled_ui(has_doc && self.tab != Tab::Crop, |ui| {
-                            let zoomed = self.zoom.scale.is_some();
-                            if ui.selectable_label(zoomed, "100%").on_hover_text("Actual pixels (Z, or double-click the photo)").clicked() {
-                                self.zoom.scale = Some(1.0);
-                            }
-                            if ui.selectable_label(!zoomed, "Fit").on_hover_text("Whole picture (Z)").clicked() {
-                                self.zoom.scale = None;
+                        let actual = zoom.scale.is_some_and(|s| (s - 1.0).abs() < 0.005);
+                        if ui.selectable_label(actual, "100%").on_hover_text("Actual pixels (Z, or double-click the photo)").clicked() {
+                            zoom.set(1.0);
+                        }
+                        ui.add_space(6.0);
+                        if ui.button("−").on_hover_text("Zoom out").clicked() {
+                            zoom.set(zoom.current() / 1.25);
+                        }
+                        // The slider runs evenly through the zoom steps: each bit of travel multiplies the size.
+                        let span = (zoom.most / zoom.fit).max(1.001).ln();
+                        let mut t = ((zoom.current() / zoom.fit).max(1.0).ln() / span).clamp(0.0, 1.0);
+                        ui.spacing_mut().slider_width = 150.0;
+                        if ui.add(egui::Slider::new(&mut t, 0.0..=1.0).show_value(false)).on_hover_text("Zoom. Pinch or scroll over the photo does the same.").changed() {
+                            zoom.set(zoom.fit * (t * span).exp());
+                        }
+                        if ui.button("+").on_hover_text("Zoom in").clicked() {
+                            zoom.set((zoom.current() * 1.25).max(zoom.fit * 1.05));
+                        }
+                        ui.label(RichText::new(format!("{:.0}%", zoom.current() * 100.0)).color(theme::MUTED).small());
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_enabled_ui(has_doc, |ui| {
+                            let label = if self.show_before { "Showing: Before" } else { "Before / After" };
+                            if ui
+                                .toggle_value(&mut self.show_before, label)
+                                .on_hover_text("Compare with the photo as shot. Shortcut: the \\ key.")
+                                .changed()
+                            {
+                                self.adjustments_changed();
                             }
                         });
                     });
@@ -785,6 +888,7 @@ impl eframe::App for EditorApp {
         self.top_bar(ui);
         self.status_bar(ui);
         self.side_panel(ui);
+        self.view_bar(ui);
         self.canvas(ui);
         self.modals(&ctx);
         self.commit_history(&ctx);

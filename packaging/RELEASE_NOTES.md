@@ -1,5 +1,15 @@
 An offline photo editor for iPhone ProRAW, JPEG, PNG and HEIC. No account, no internet connection.
 
+## New in 0.3
+
+* **Masks:** linear gradient, radial gradient and brush, each with its own sliders.
+* **Healing:** click a blemish to cover it (Heal or Clone).
+* **Point Color:** pick an exact colour from the photo and change only that.
+* **Geometry:** perspective sliders (Vertical, Horizontal, Rotate, Aspect, Scale, offsets).
+* **Highlights and Whites** reach further. Edits made in 0.2 that used them will look a little different.
+* **Zoom** has a slider and buttons under the photo; pinch works on a trackpad.
+* **Before / After** is now at the bottom right of the photo.
+
 ## Download
 
 | Your computer | File |
@@ -22,4 +32,4 @@ You only do steps 2 and 3 once. The warning appears because the app isn't signed
 
 Full instructions and a guide to the controls are in the README.
 
-The Mac version is built and tested by GitHub's Mac machines. It has not yet been used by a person on a real Mac, so please report anything that looks wrong.
+The Mac version is built and tested by GitHub's Mac machines. Pinch-to-zoom and two-finger panning could not be tested there, so please report anything that looks wrong.

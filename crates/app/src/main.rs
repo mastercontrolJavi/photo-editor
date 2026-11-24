@@ -6,6 +6,7 @@ mod canvas;
 mod engine;
 mod side;
 mod theme;
+mod tools;
 mod widgets;
 
 use std::path::PathBuf;
@@ -13,25 +14,30 @@ use std::path::PathBuf;
 fn main() -> eframe::Result {
     // `photo-editor.exe IMG_0001.DNG` (or "Open with…" in Explorer) opens that file.
     // Options for checking the app from a script:
-    //   --tab <edit|crop|presets|info>   start on that tab
+    //   --tab <edit|crop|heal|mask|presets|info>   start on that tab
     //   --expand                         start with every group in the Edit tab open
     //   --zoom                           start zoomed to 100%
+    //   --select                         start with the first mask and healing spot selected
     //   --only <Section,Section>         start with only these Edit sections open
     let mut initial = None;
     let mut start_tab = app::Tab::Edit;
     let mut start_zoomed = false;
+    let mut select_first = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--tab") => {
                 start_tab = match args.next().and_then(|t| t.to_str().map(str::to_lowercase)).as_deref() {
                     Some("crop") => app::Tab::Crop,
+                    Some("heal") => app::Tab::Heal,
+                    Some("mask") => app::Tab::Mask,
                     Some("presets") => app::Tab::Presets,
                     Some("info") => app::Tab::Info,
                     _ => app::Tab::Edit,
                 };
             }
             Some("--zoom") => start_zoomed = true,
+            Some("--select") => select_first = true,
             Some("--only") => {
                 let names = args.next().and_then(|t| t.to_str().map(|s| s.split(',').map(str::to_string).collect()));
                 let _ = widgets::ONLY_SECTIONS.set(names.unwrap_or_default());
@@ -54,5 +60,5 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("Photo Editor", options, Box::new(move |cc| Ok(Box::new(app::EditorApp::new(cc, initial, start_tab, start_zoomed)))))
+    eframe::run_native("Photo Editor", options, Box::new(move |cc| Ok(Box::new(app::EditorApp::new(cc, initial, start_tab, start_zoomed, select_first)))))
 }

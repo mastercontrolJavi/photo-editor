@@ -124,6 +124,19 @@ pub fn hue_colour(hue: f32) -> Color32 {
     Color32::from_rgb((r * 235.0) as u8, (g * 235.0) as u8, (b * 235.0) as u8)
 }
 
+/// A colour to show for a Point Color pick: hue in degrees, saturation and
+/// brightness 0 … 1.
+pub fn swatch_colour(hue: f32, saturation: f32, brightness: f32) -> Color32 {
+    let pure = hue_colour(hue);
+    let s = saturation.clamp(0.0, 1.0);
+    // Mix the pure hue towards white by the saturation, then scale to the brightness.
+    let rgb = [pure.r(), pure.g(), pure.b()].map(|c| 1.0 + (c as f32 / 235.0 - 1.0) * s);
+    let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let k = (brightness.clamp(0.02, 1.0) / luma.max(1e-3)).min(1.0 / rgb[0].max(rgb[1]).max(rgb[2]));
+    let [r, g, b] = rgb.map(|c| (c * k * 255.0).round().clamp(0.0, 255.0) as u8);
+    Color32::from_rgb(r, g, b)
+}
+
 fn strip(ui: &mut egui::Ui, width: f32, colours: &[Color32]) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 3.0), Sense::hover());
     let mut mesh = egui::Mesh::default();
@@ -161,7 +174,11 @@ pub fn subsection(ui: &mut egui::Ui, title: &str, marked: bool, body: impl FnOnc
     let text = if marked { format!("{title}  •") } else { title.to_string() };
     egui::CollapsingHeader::new(RichText::new(text).color(theme::TEXT))
         .id_salt(("sub", title))
-        .default_open(EXPAND_ALL.load(std::sync::atomic::Ordering::Relaxed))
+        .default_open(match ONLY_SECTIONS.get() {
+            // `--only` can name groups as well as sections.
+            Some(only) => only.iter().any(|name| name.eq_ignore_ascii_case(title)),
+            None => EXPAND_ALL.load(std::sync::atomic::Ordering::Relaxed),
+        })
         .show_unindented(ui, |ui| {
             ui.add_space(2.0);
             body(ui);

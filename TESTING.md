@@ -1,6 +1,6 @@
 # Test results and verification gaps
 
-First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11-23. The test machine had:
+First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11-23, and Geometry, Point Color, masks and healing on 2026-11-24. The test machine had:
 
 * Windows 11 Home 10.0.26300
 * Intel Core Ultra 7 155H (16 cores / 22 threads), 15.6 GB RAM
@@ -11,7 +11,8 @@ First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11
 | Area | Status |
 |---|---|
 | Build and launch on Windows | **Passed.** Release build, launched 5 times, opened files, closed cleanly. |
-| Pipeline: decode, adjust, preview, export, edit files | **Passed.** 115 automated tests (see the sections below for what the new ones cover). |
+| Pipeline: decode, adjust, preview, export, edit files | **Passed.** 146 automated tests (see the sections below for what the new ones cover). |
+| Geometry, Point Color, masks, healing, zoom controls (added 2026-11-24, fourth batch) | **Built and tested by program**, including pretend mouse input. Checked by eye on contact sheets and screenshots of real photos. Not yet used by a person. Pinch-to-zoom cannot be tested without a trackpad. |
 | JPEG, PNG, HEIC and profiles (added 2026-11-23, third batch) | **Built and tested by program.** Your real iPhone JPEG and HEIC open correctly. Not yet used by a person. |
 | Detail, optics, zoom, Auto (added 2026-11-23, second batch) | **Built and tested by program.** Checked by eye at 100 % on real photos. Not yet used by a person. |
 | Tone, colour, effects, crop, presets (added 2026-11-23) | **Built and tested by program.** Checked by eye on contact sheets of real photos. Not yet used by a person. |
@@ -21,6 +22,79 @@ First recorded on 2026-11-22; the Lightroom-style controls were added on 2026-11
 | Clicking through the app by hand | **Pending.** The owner runs the checklist at the end of this file. |
 
 The automated tests use generic DNGs built by the test code. Real-file results are in the sections below.
+
+## Geometry, Point Color, masks, healing and viewing (2026-11-24, fourth batch)
+
+Added after feedback from a working photo and video editor who tried version 0.2 on a Mac:
+
+| What was asked for | What was done |
+|---|---|
+| More range in Highlights and Whites | Both now squeeze or stretch the bright tones instead of sliding them by a fixed amount (see below). |
+| A low / mid / high range control | Already there as Color Grading (the tester found it). Nothing changed. |
+| An easier way to see before and after | The toggle moved from the top bar to the bottom right of the photo, labelled **Before / After**. The `\` key still works. |
+| Masks, for gradients | A Mask tab with linear gradient, radial gradient and brush masks. |
+| Zoom that is easy to adjust; pinch on a Mac | A strip under the photo with Fit, 100%, −, +, a slider and the current percentage. Pinch now zooms. Two fingers on a trackpad slide the picture. |
+| Picking a colour from the photo | Point Color, in the Color section. |
+
+Also added: Geometry (perspective sliders) and a Heal tab.
+
+### How Highlights and Whites changed
+
+Worked out from the formulas for a plain grey area, in stops (one stop is a halving or doubling of light), at the slider's far end:
+
+| Tone | Highlights −100 before | Highlights −100 now | Whites −100 before | Whites −100 now |
+|---|---|---|---|---|
+| Middle grey | −0.13 | −0.11 | −0.18 | 0 |
+| 1.5 stops above middle grey | −1.28 | −1.28 | −0.73 | −0.60 |
+| White (2.5 stops above) | −1.60 | −2.10 | −0.90 | −1.38 |
+| 1 stop brighter than white (RAW only) | −1.60 | −2.95 | −0.90 | −2.18 |
+
+So the mid-tones behave as before and the top end moves about a third further (Highlights) or half as far again (Whites), and further still for detail brighter than white in a RAW file. The positive direction changed the same way.
+
+**This changes the look of edits saved with version 0.2 that used Highlights or Whites**, and of any preset that uses them: bright areas come out somewhat darker (or brighter) than before. The test "brighter in never comes out darker" still passes with every tone slider at its extreme.
+
+### What was verified
+
+* **By program (31 new tests, 146 in all)**
+  * Geometry: the sliders at rest do nothing; there-and-back mapping is exact; Vertical −60 widens the top and makes leaning verticals more upright; Rotate, Scale, Aspect and the offsets move the picture the way their labels say; empty corners are found, and Constrain zooms in just far enough to remove them (the nearest corner ends within 3 px of the photo's edge); the same settings give the same picture at any size; preview path and export path give identical pixels.
+  * Masks: a linear gradient is full on one side, half-way in the middle, nothing on the other, and only ever falls; a radial gradient is a true circle on a wide photo, follows its angle, and inverts; brush strokes paint and erase; continuing a stroke point by point gives exactly the mask that painting it in one go gives.
+  * Mask sliders: Exposure, Temp/Tint and the tone sliders give exactly the same pixels as the main sliders when the mask covers everything; a mask with no slider moved changes nothing; a mask stays on the same part of the photo when the picture is warped or cropped.
+  * Point Color: picking the orange stripe of a test image and setting Saturation −100 turns it grey and leaves the blue and grey stripes bit-for-bit unchanged; hue and luminance shifts likewise; a grey pick is matched by brightness.
+  * Healing: on a textured wall that gets lighter towards one side, Heal removes a dark blemish and leaves the patch within 8 % of the clean wall, where Clone from the same source is more than 8 % too light; pixels outside every spot are untouched; opacity and feather blend as expected; the suggested source avoids a dark line next to the spot and stays inside the photo.
+  * In the app, driven with pretend mouse input: dragging out a linear gradient, moving each of its three handles; dragging out a radial gradient, resizing and moving it; painting a stroke and a single erasing dab; adding a healing spot with a click, moving its source, moving the spot, adding a second, and clicking outside the photo; screen positions map to photo positions and back through a turned, flipped, straightened, cropped and warped picture.
+  * Edit files: masks of all three kinds, spots, picked colours and Geometry survive saving and loading. Presets never carry or remove a photo's masks, spots, crop or Geometry.
+  * Preview against export with three masks, a picked colour, two spots and a constrained warp at once: mean 0.46 levels, 99th percentile 1.9 (limits 1.0 and 3.0).
+* **By eye, on real photos**
+  * `batch4\local-7235.jpg` and `local-7235-leaves.jpg` (IMG_7235, 48 MP ProRAW): Highlights −100, Whites ±100, a linear mask darkening the top, one warming it, a radial mask and its inverse, a brush mask with an erased strip, Point Color on the yellow leaves (to grey, to green, darker), and four Geometry settings. All behave as labelled. With the leaves picked, the trunks, sky and buildings are left alone.
+  * `batch4\heal-7235.jpg`: 100 % crops of a small and a large healing spot on fallen leaves. No visible seam.
+  * `batch4\local-0637-jpeg.jpg`: the same sheet on an iPhone JPEG.
+  * App screenshots of the Mask tab (red overlay, handles), the Heal tab (fitted and at 100 %), and the Point Color panel, on a copy of IMG_7235 with an edit file using every new feature. A full-size export of that edit took 3.7 s.
+* **A bug found and fixed while testing:** sharpening drew a line along the edge of a warped picture; and selecting a healing spot marked the edit as changed.
+* The owner's 9 originals were checked unchanged (SHA-256) after this batch, and the 2 edit files beside them still carry their dates from 2026-11-23. All testing of the new tools used a copy elsewhere.
+
+### Speed (IMG_7303, 48 MP, largest preview 1920 × 2560)
+
+| Edit | Per preview |
+|---|---|
+| Nothing | 19 ms |
+| One linear mask (exposure) | 32 ms |
+| One radial mask with Highlights and Shadows | 71 ms |
+| One brush mask | 29 ms |
+| Point Color, one colour | 40 ms |
+| Geometry | 38 ms |
+| 20 healing spots | 36 ms |
+| Everything at once on IMG_7235 (3 masks, warp, 2 spots, a picked colour) | 118–128 ms in the app |
+
+While a slider or handle is dragged the app renders one size smaller, which takes well under half of these.
+
+### Not verified
+
+* **No person has used any of this yet.** Screenshots show the tools drawn correctly; nobody has painted a mask or healed a real blemish by hand.
+* **Pinch-to-zoom and two-finger panning** were written for the Mac trackpad and cannot be tested on this PC or on GitHub's Mac machines. They rely on the window library reporting pinches and trackpad scrolling the documented way.
+* **The slider strengths were not compared with Lightroom.** The new Highlights and Whites are stronger than before; whether they now match what the tester expects is for him to say.
+* **Geometry's direction and strength** follow Lightroom's labels (negative Vertical for buildings leaning back) but were not compared side by side with it.
+* **Healing** was checked on leaf litter and on synthetic walls, not on skin or a sky with a real dust spot.
+* **Point Color** matching was checked on one ProRAW and one JPEG. Lightroom also has separate hue, saturation and luminance range sliders; here one Range slider drives all three.
 
 ## JPEG, PNG, HEIC and profiles (2026-11-23, third batch)
 
@@ -220,7 +294,7 @@ The side-by-side images, exports and screenshots are in `Downloads\ProRAW test r
 
 ## Automated tests
 
-Run: `cargo test --workspace --release -- --nocapture`. Result: **115 passed, 0 failed.**
+Run: `cargo test --workspace --release -- --nocapture`. Result: **146 passed, 0 failed.**
 
 What the tests cover:
 
@@ -333,7 +407,14 @@ Known effects on ProRAW:
 2. **Your reference edits:** compare a portrait and your own edits of these shots against our exports, for skin tone, highlights and shadows. No portrait was in this test set.
 3. ~~Speed on real files~~: done (see above).
 4. **Hands-on check in the app:**
-   0. New on 2026-11-23: try the Edit sliders, the curve, the Crop tab (drag corners, straighten, rotate), click a few starter presets, and import a downloaded Lightroom preset. Zoom to 100 % (press Z), drag to pan, and try Sharpening and Noise Reduction there. Try Auto.
+   0. New on 2026-11-24:
+      * Pull Highlights and Whites to −100 on a photo with a bright sky. Is the range enough now?
+      * Mask tab: drag out a Linear gradient over a sky and lower its Exposure. Add a Radial one, tick Invert. Paint with the Brush, then Erase part of it.
+      * Heal tab: zoom in, click a blemish, drag the dashed circle to another patch. Press Delete.
+      * Edit → Color → Point Color: pick a colour, move Hue shift.
+      * Edit → Geometry: Vertical −30 on a building, then tick Constrain crop.
+      * Under the photo: the zoom slider, − and +, and Before / After. On a Mac: pinch to zoom, two fingers to slide.
+   0. From 2026-11-23: try the Edit sliders, the curve, the Crop tab (drag corners, straighten, rotate), click a few starter presets, and import a downloaded Lightroom preset. Zoom to 100 % (press Z), drag to pan, and try Sharpening and Noise Reduction there. Try Auto.
    1. Drag each slider. The preview should follow smoothly.
    2. Press `\` and the Before/After buttons.
    3. Ctrl+S, close the app, reopen the photo. The edit should come back.
@@ -350,7 +431,7 @@ Known effects on ProRAW:
 4. ~~**Detail and optics.**~~ Done on 2026-11-23: Texture, Sharpening, Noise Reduction, Defringe, chromatic aberration, Distortion, lens vignetting. Still open: lens-correction data stored in non-iPhone DNGs (no sample file to test with).
 5. ~~**Closer preset matching.**~~ Calibration and the parametric curve are done. Still open: Lightroom colour profiles / look tables embedded in presets.
 6. **Faster tone step.** Replace the per-pixel logarithms with look-up tables, aiming for a heavy edit under 50 ms at 2560 px.
-7. **Geometry (perspective), Point Color.** Auto and zoom to 100 % are done.
+7. ~~**Geometry (perspective), Point Color, masks, healing.**~~ Done on 2026-11-24. Still open: automatic Upright; masks that select a subject, sky, colour or brightness range; healing along a painted line; separate hue / saturation / luminance ranges for Point Color.
 8. **Folder browsing with thumbnails.** Use the DNG's embedded preview for speed.
 9. **Copy/paste edits and batch JPEG export.**
 10. ~~**HEIC input.**~~ Done on 2026-11-23, with JPEG and PNG, using Windows' own decoder. Still open: TIFF, and converting Adobe RGB / ProPhoto colour profiles.

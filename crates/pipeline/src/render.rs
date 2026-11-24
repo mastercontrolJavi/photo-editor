@@ -4,16 +4,18 @@
 //!
 //! Order of operations for each pixel:
 //!
-//! 0. Lens corrections and the detail sliders (Texture, Sharpening, Noise
-//!    Reduction, Defringe), which need each pixel's neighbours.
+//! 0. Reading the photo: the Geometry warp, lens corrections and healing
+//!    spots, then the detail sliders (Texture, Sharpening, Noise Reduction,
+//!    Defringe), which need each pixel's neighbours.
 //! 1. Dehaze (on the photo's own values).
 //! 2. White balance + exposure (one 3×3 matrix).
 //! 3. Tone: Clarity, Shadows, Highlights, Whites, Blacks, Contrast. These work
 //!    on brightness in stops and scale the colour as a whole, so hue doesn't shift.
+//!    Then each mask's own sliders, as strongly as the mask says at that point.
 //! 4. The camera's own tone curve from the file (or a plain clip to 0…1).
 //! 5. Vignette.
-//! 6. sRGB encoding, then the "display" steps: point curves, Color Mixer,
-//!    Vibrance/Saturation, B&W, Color Grading, LUT, Grain.
+//! 6. sRGB encoding, then the "display" steps: point curves, Point Color,
+//!    Color Mixer, Vibrance/Saturation, B&W, Color Grading, LUT, Grain.
 //!
 //! These sliders are modelled on Lightroom's but the maths is our own, so the
 //! same number gives a similar result, not an identical one.
@@ -22,9 +24,12 @@ use std::sync::OnceLock;
 
 use rayon::prelude::*;
 
-use crate::adjust::{curve_table, parametric_table, Adjustments, Calibration, Wheel, BAND_HUES};
+use crate::adjust::{curve_table, parametric_table, Adjustments, Calibration, Mask, PointColor, Wheel, BAND_HUES};
 use crate::detail::Detail;
+use crate::heal::Healer;
 use crate::lens::Lens;
+use crate::mask::MaskEval;
+use crate::perspective::Warp;
 use crate::color::{self, fast_exp2, fast_pow, Mat3};
 use crate::geometry::{Affine, Crop};
 use crate::image::LinearImage;
@@ -212,6 +217,19 @@ fn luma(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
+/// Zero up to 0, then bending smoothly (over `width`) into a straight line
+/// that rises one for one.
+#[inline(always)]
+fn knee(d: f32, width: f32) -> f32 {
+    if d <= 0.0 {
+        0.0
+    } else if d < width {
+        d * d / (2.0 * width)
+    } else {
+        d - 0.5 * width
+    }
+}
+
 // ───────────────────────────────── tone ─────────────────────────────────
 
 /// Stops (relative to middle grey) treated as display black and white by Contrast.
@@ -230,15 +248,22 @@ struct Tone {
 
 impl Tone {
     fn new(a: &Adjustments) -> Option<Self> {
+        Self::from_sliders(a.clarity, a.shadows, a.highlights, a.whites, a.blacks, a.contrast)
+    }
+
+    /// Each slider is −100 … +100.
+    fn from_sliders(clarity: f32, shadows: f32, highlights: f32, whites: f32, blacks: f32, contrast: f32) -> Option<Self> {
         let t = Tone {
-            clarity: a.clarity / 100.0,
-            shadows: a.shadows / 100.0,
-            highlights: a.highlights / 100.0,
-            whites: a.whites / 100.0,
-            blacks: a.blacks / 100.0,
-            slope: 2f32.powf(a.contrast / 100.0 * 0.8),
+            clarity: clarity / 100.0,
+            shadows: shadows / 100.0,
+            // At −100 the bright tones keep 15 % of their spread (never none,
+            // so a brighter tone never comes out darker than a dimmer one).
+            highlights: highlights / 100.0 * if highlights < 0.0 { 0.85 } else { 0.8 },
+            whites: whites / 100.0 * 0.8,
+            blacks: blacks / 100.0,
+            slope: 2f32.powf(contrast / 100.0 * 0.8),
         };
-        let active = [t.clarity, t.shadows, t.highlights, t.whites, t.blacks].iter().any(|v| *v != 0.0) || a.contrast != 0.0;
+        let active = [t.clarity, t.shadows, t.highlights, t.whites, t.blacks].iter().any(|v| *v != 0.0) || contrast != 0.0;
         active.then_some(t)
     }
 
@@ -259,11 +284,18 @@ impl Tone {
             // Decide "is this a shadow / a highlight?" mostly from the surroundings,
             // so fine detail inside a shadow is lifted together and keeps its contrast.
             let m = x + (xb - x) * 0.7;
-            o += self.shadows * 2.2 * (1.0 - ramp(-4.5, 1.0 / 5.5, m));
-            o += self.highlights * 1.6 * ramp(-0.5, 1.0 / 2.8, m);
+            let lift = self.shadows * 2.2 * (1.0 - ramp(-4.5, 1.0 / 5.5, m));
+            o += lift;
+            // Highlights squeezes (or stretches) the spread of everything
+            // brighter than half a stop under middle grey. The further above
+            // that a tone is, the further it moves, so a blown-out sky comes
+            // down a long way while the mid-tones barely change.
+            o += self.highlights * knee(m + lift + 0.5, 1.0);
         }
         if self.whites != 0.0 {
-            o += self.whites * 0.9 * ramp(-1.0, 1.0 / (X_WHITE + 1.0), o);
+            // Whites does the same from middle grey up, bending in more slowly:
+            // it mostly moves the very brightest tones.
+            o += self.whites * knee(o, 1.5);
         }
         if self.blacks != 0.0 {
             o += self.blacks * 1.4 * (1.0 - ramp(-6.0, 1.0 / 5.0, o));
@@ -500,6 +532,91 @@ impl Grain {
     }
 }
 
+// ───────────────────────────── point colour ─────────────────────────────
+
+/// One picked colour, ready to be compared with pixels.
+struct PointPrep {
+    hue: f32,
+    sat: f32,
+    lum: f32,
+    /// A grey pick has no hue worth matching; it is matched on saturation and brightness alone.
+    use_hue: bool,
+    hue_width: f32,
+    sat_width: f32,
+    lum_width: f32,
+    /// Degrees.
+    hue_shift: f32,
+    sat_change: f32,
+    lum_change: f32,
+}
+
+impl PointPrep {
+    fn new(p: &PointColor) -> Option<Self> {
+        if !p.changes_something() {
+            return None;
+        }
+        let reach = p.range / 100.0;
+        Some(PointPrep {
+            hue: p.hue,
+            sat: p.saturation,
+            lum: p.luminance,
+            use_hue: p.saturation >= 0.08,
+            hue_width: 12.0 + 48.0 * reach,
+            sat_width: 0.15 + 0.5 * reach,
+            lum_width: 0.35 + 0.65 * reach,
+            hue_shift: p.hue_shift / 100.0 * 60.0,
+            sat_change: p.sat_shift / 100.0,
+            lum_change: p.lum_shift / 100.0 * 0.5,
+        })
+    }
+
+    /// How much a pixel counts as "this colour": 1 at the picked colour,
+    /// fading to 0 as hue, saturation or brightness move away from it.
+    #[inline]
+    fn weight(&self, h: f32, s: f32, l: f32) -> f32 {
+        let near = |distance: f32, width: f32| 1.0 - ramp(width * 0.5, 2.0 / width, distance);
+        let mut w = near((s - self.sat).abs(), self.sat_width) * near((l - self.lum).abs(), self.lum_width);
+        if w > 0.0 && self.use_hue {
+            let mut d = (h - self.hue).abs();
+            if d > 180.0 {
+                d = 360.0 - d;
+            }
+            // Greys have no real hue, so they are left alone.
+            w *= near(d, self.hue_width) * ramp(0.0, 1.0 / 0.08, s);
+        }
+        w
+    }
+}
+
+// ──────────────────────────────── masks ────────────────────────────────
+
+/// One mask, ready for rendering: where it applies and what it does there.
+struct MaskPrep {
+    eval: MaskEval,
+    /// Exposure change in stops.
+    ev: f32,
+    white_balance: Option<Mat3>,
+    tone: Option<Tone>,
+    saturation: f32,
+}
+
+impl MaskPrep {
+    /// `None` for a mask whose sliders are all at rest.
+    fn new(mask: &Mask, width: usize, height: usize) -> Option<Self> {
+        let l = &mask.adjust;
+        if *l == Default::default() {
+            return None;
+        }
+        Some(MaskPrep {
+            eval: MaskEval::new(mask, width, height),
+            ev: l.exposure,
+            white_balance: (l.temperature != 0.0 || l.tint != 0.0).then(|| color::white_balance_matrix(l.temperature, l.tint)),
+            tone: Tone::from_sliders(l.clarity, l.shadows, l.highlights, l.whites, l.blacks, l.contrast),
+            saturation: l.saturation / 100.0,
+        })
+    }
+}
+
 // ─────────────────────────────── the renderer ───────────────────────────────
 
 struct Prepared<'a> {
@@ -523,6 +640,8 @@ struct Prepared<'a> {
     /// The look chosen from the Profile menu, and how strongly to apply it.
     style: Option<(std::sync::Arc<Lut3D>, f32)>,
     grain: Option<Grain>,
+    points: Vec<PointPrep>,
+    masks: Vec<MaskPrep>,
 }
 
 const CURVE_STEPS: usize = 1024;
@@ -531,7 +650,11 @@ impl<'a> Prepared<'a> {
     fn new(scene: &Scene<'a>, a: &Adjustments, view: &View) -> Self {
         let tone = Tone::new(a);
         let dehaze = a.dehaze / 100.0;
-        let wants_local = dehaze != 0.0 || tone.as_ref().is_some_and(Tone::needs_surroundings);
+        let masks: Vec<MaskPrep> = a.masks.iter().filter_map(|m| MaskPrep::new(m, scene.image.width, scene.image.height)).collect();
+        let points: Vec<PointPrep> = if a.bw { Vec::new() } else { a.point_colors.iter().filter_map(PointPrep::new).collect() };
+        let wants_local = dehaze != 0.0
+            || tone.as_ref().is_some_and(Tone::needs_surroundings)
+            || masks.iter().any(|m| m.tone.as_ref().is_some_and(Tone::needs_surroundings));
         let local = if wants_local { scene.look.local.as_deref() } else { None };
 
         let curves = (!a.curve.is_identity()).then(|| {
@@ -562,6 +685,7 @@ impl<'a> Prepared<'a> {
             _ => None,
         };
         let display = curves.is_some()
+            || !points.is_empty()
             || style.is_some()
             || mixer_active
             || a.bw
@@ -588,6 +712,8 @@ impl<'a> Prepared<'a> {
             lut,
             style,
             grain,
+            points,
+            masks,
         }
     }
 
@@ -595,6 +721,10 @@ impl<'a> Prepared<'a> {
     /// the photo (0…1) and `(nx, ny)` its position in the finished picture (−1…1).
     #[inline]
     fn shade(&self, p: [f32; 3], u: f32, v: f32, nx: f32, ny: f32, crop_px: (f32, f32)) -> [u8; 3] {
+        if u < 0.0 {
+            // An empty corner left by the Geometry warp: no photo here.
+            return [0; 3];
+        }
         let d = self.to_display(p, u, v, nx, ny);
         if !self.display {
             let lut = encode_lut();
@@ -615,15 +745,23 @@ impl<'a> Prepared<'a> {
             p = self.remove_haze(p, dark);
         }
         let mut c = color::apply(&self.matrix, p);
-        if let Some(tone) = &self.tone {
+        // How much brighter this pixel's surroundings are than the pixel, in stops.
+        let mut surround = 0.0;
+        if self.tone.is_some() || (self.local.is_some() && !self.masks.is_empty()) {
             let y = luma(c);
             if y > 1e-6 && y.is_finite() {
                 let x = stops(y);
                 // The helper maps describe the photo before exposure was applied.
                 let xb = ga * x + gb + (1.0 - ga) * self.gain_ev;
-                let k = fast_exp2(tone.map(x, xb) - x);
-                c = [c[0] * k, c[1] * k, c[2] * k];
+                surround = xb - x;
+                if let Some(tone) = &self.tone {
+                    let k = fast_exp2(tone.map(x, xb) - x);
+                    c = [c[0] * k, c[1] * k, c[2] * k];
+                }
             }
+        }
+        if !self.masks.is_empty() {
+            c = self.apply_masks(c, u, v, surround);
         }
         let mut d = match self.profile {
             Some(curve) => curve.apply_rgb(c),
@@ -637,10 +775,42 @@ impl<'a> Prepared<'a> {
         d
     }
 
-    /// The display steps, on sRGB-encoded values: profile look, curves,
-    /// colour, look-up table, grain. Returns sRGB-encoded values (not yet clamped).
+    /// Each mask's sliders, applied as strongly as the mask says at `(u, v)`.
     #[inline]
-    fn finish(&self, d: [f32; 3], nx: f32, ny: f32, crop_px: (f32, f32)) -> [f32; 3] {
+    fn apply_masks(&self, mut c: [f32; 3], u: f32, v: f32, surround: f32) -> [f32; 3] {
+        for m in &self.masks {
+            let w = m.eval.weight(u, v);
+            if w <= 0.002 {
+                continue;
+            }
+            if let Some(wb) = &m.white_balance {
+                let t = color::apply(wb, c);
+                c = [c[0] + (t[0] - c[0]) * w, c[1] + (t[1] - c[1]) * w, c[2] + (t[2] - c[2]) * w];
+            }
+            if m.ev != 0.0 {
+                let k = fast_exp2(m.ev * w);
+                c = [c[0] * k, c[1] * k, c[2] * k];
+            }
+            if let Some(tone) = &m.tone {
+                let y = luma(c);
+                if y > 1e-6 && y.is_finite() {
+                    let x = stops(y);
+                    let k = fast_exp2(w * (tone.map(x, x + surround) - x));
+                    c = [c[0] * k, c[1] * k, c[2] * k];
+                }
+            }
+            if m.saturation != 0.0 {
+                let (l, f) = (luma(c), 1.0 + m.saturation * w);
+                c = c.map(|v| (l + (v - l) * f).max(0.0));
+            }
+        }
+        c
+    }
+
+    /// The first display steps: sRGB encoding, the profile's look and the
+    /// curves. Point Color compares pixels with the picked colour at this stage.
+    #[inline]
+    fn encoded(&self, d: [f32; 3]) -> [f32; 3] {
         let table = encode_table();
         let mut g = d.map(|v| encode_f(table, v));
         if let Some((style, amount)) = &self.style {
@@ -649,6 +819,44 @@ impl<'a> Prepared<'a> {
         }
         if let Some(curves) = &self.curves {
             g = [read_table(&curves[0], g[0]), read_table(&curves[1], g[1]), read_table(&curves[2], g[2])];
+        }
+        g
+    }
+
+    /// Point Color: shift the pixels that are close to a picked colour.
+    #[inline]
+    fn shift_points(&self, mut g: [f32; 3]) -> [f32; 3] {
+        let (h, s, v) = rgb_to_hsv(g);
+        let l = luma(g);
+        let (mut turn, mut sat, mut lum) = (0.0f32, 1.0f32, 1.0f32);
+        for p in &self.points {
+            let w = p.weight(h, s, l);
+            if w > 0.0 {
+                turn += w * p.hue_shift;
+                sat *= 1.0 + w * p.sat_change;
+                lum *= 1.0 + w * p.lum_change;
+            }
+        }
+        if turn != 0.0 {
+            g = hsv_to_rgb(h + turn.clamp(-180.0, 180.0), s, v);
+        }
+        if sat != 1.0 {
+            let l = luma(g);
+            g = g.map(|c| (l + (c - l) * sat).clamp(0.0, 1.0));
+        }
+        if lum != 1.0 {
+            g = g.map(|c| (c * lum).clamp(0.0, 1.0));
+        }
+        g
+    }
+
+    /// The display steps, on sRGB-encoded values: profile look, curves,
+    /// colour, look-up table, grain. Returns sRGB-encoded values (not yet clamped).
+    #[inline]
+    fn finish(&self, d: [f32; 3], nx: f32, ny: f32, crop_px: (f32, f32)) -> [f32; 3] {
+        let mut g = self.encoded(d);
+        if !self.points.is_empty() {
+            g = self.shift_points(g);
         }
         let (mut h, mut s, mut val) = (0.0f32, 0.0f32, 0.0f32);
         let need_hsv = self.mixer.is_some() || self.vibrance != 0.0;
@@ -767,40 +975,107 @@ pub(crate) fn shade_colours(adj: &Adjustments, colours: &[[f32; 3]]) -> Vec<[f32
 struct Fetch<'a> {
     img: &'a LinearImage,
     to_source: Option<Affine>,
+    /// The Geometry warp: the picture being rendered → the photo.
+    warp: Option<Warp>,
     lens: Option<Lens>,
+    healer: Option<Healer>,
+    /// No warp, lens correction or healing: pixels can be read as they are.
+    plain: bool,
     inv_w: f32,
     inv_h: f32,
 }
 
 impl Fetch<'_> {
+    /// The photo's colour at `(x, y)` (in its pixels), with healing spots applied.
+    #[inline]
+    fn read(&self, x: f32, y: f32) -> [f32; 3] {
+        let base = bilinear(self.img, x, y);
+        match &self.healer {
+            Some(healer) => healer.apply(self.img, x, y, base),
+            None => base,
+        }
+    }
+
     /// The photo's colour for output pixel `(x, y)` and where in the photo it
     /// came from (0…1). `y` may lie above or below the output; the detail
-    /// filters need a few such rows.
+    /// filters need a few such rows. Where the Geometry warp leaves an empty
+    /// corner, the position's first number is −1.
     #[inline]
     fn at(&self, x: usize, y: isize) -> ([f32; 3], f32, f32) {
-        let (sx, sy) = match &self.to_source {
-            None if self.lens.is_none() => {
+        let (mut sx, mut sy) = match &self.to_source {
+            None if self.plain => {
                 let row = y.clamp(0, self.img.height as isize - 1) as usize;
                 return (self.img.pixels[row * self.img.width + x], (x as f32 + 0.5) * self.inv_w, (row as f32 + 0.5) * self.inv_h);
             }
-            None => (x as f32 + 0.5, y as f32 + 0.5),
-            Some(t) => {
-                let (sx, sy) = t.apply(x as f64 + 0.5, y as f64 + 0.5);
-                (sx as f32, sy as f32)
-            }
+            None => (x as f64 + 0.5, y as f64 + 0.5),
+            Some(t) => t.apply(x as f64 + 0.5, y as f64 + 0.5),
         };
+        if let Some(warp) = &self.warp {
+            match warp.to_source(sx, sy) {
+                Some(p) => (sx, sy) = p,
+                None => {
+                    // An empty corner. It is drawn black, but the detail filters
+                    // look at neighbouring pixels, so give them the nearest bit
+                    // of photo: otherwise sharpening would draw a bright line
+                    // along the edge of the picture.
+                    let near = warp.to_source_unbounded(sx, sy).map(|(x, y)| {
+                        self.read(x.clamp(0.0, self.img.width as f64) as f32, y.clamp(0.0, self.img.height as f64) as f32)
+                    });
+                    return (near.unwrap_or([0.0; 3]), -1.0, 0.0);
+                }
+            }
+        }
+        let (sx, sy) = (sx as f32, sy as f32);
         let Some(lens) = &self.lens else {
-            return (bilinear(self.img, sx, sy), sx * self.inv_w, sy * self.inv_h);
+            return (self.read(sx, sy), sx * self.inv_w, sy * self.inv_h);
         };
         let ([g, r, b], gain) = lens.map(sx, sy);
-        let mut p = bilinear(self.img, g.0, g.1);
+        let mut p = self.read(g.0, g.1);
         if lens.splits_colours() {
             // Red and blue are read from slightly different places to line them up with green.
-            p[0] = bilinear(self.img, r.0, r.1)[0];
-            p[2] = bilinear(self.img, b.0, b.1)[2];
+            p[0] = self.read(r.0, r.1)[0];
+            p[2] = self.read(b.0, b.1)[2];
         }
         ([p[0] * gain, p[1] * gain, p[2] * gain], g.0 * self.inv_w, g.1 * self.inv_h)
     }
+}
+
+/// The colour the photo shows at a point, for Point Color's picker: hue in
+/// degrees, then saturation and brightness (0…1). `(u, v)` is the place in the
+/// photo (0…1 across and down); a few pixels around it are averaged so a
+/// single noisy pixel doesn't decide. It is measured where Point Color itself
+/// works: after the Light sliders, the profile and the curves.
+pub fn pick_colour(preview: &LinearImage, adj: &Adjustments, look: &Look, full_size: (usize, usize), u: f32, v: f32) -> [f32; 3] {
+    let mut adj = adj.clone().sanitized();
+    adj.point_colors.clear();
+    let scene = Scene { image: preview, look, lut: None };
+    let (w, h) = (preview.width, preview.height);
+    let view = View::preview(&adj.crop, w, h, full_size.0, full_size.1);
+    let prep = Prepared::new(&scene, &adj, &view);
+    let (cx, cy) = ((u * w as f32) as isize, (v * h as f32) as isize);
+    // A few pixels either side on a normal preview; none on a tiny image.
+    let reach = (w.max(h) / 600) as isize;
+    let (mut sum, mut n) = ([0.0f32; 3], 0.0f32);
+    for y in (cy - reach).max(0)..=(cy + reach).min(h as isize - 1) {
+        for x in (cx - reach).max(0)..=(cx + reach).min(w as isize - 1) {
+            let p = preview.pixels[y as usize * w + x as usize];
+            sum = [sum[0] + p[0], sum[1] + p[1], sum[2] + p[2]];
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        return [0.0, 0.0, 0.5];
+    }
+    let p = sum.map(|c| c / n);
+    // Where this point sits in the finished picture (the vignette depends on it).
+    let (px, py) = match Warp::new(&adj.geometry, w, h) {
+        Some(warp) => warp.from_source((u * w as f32) as f64, (v * h as f32) as f64),
+        None => ((u * w as f32) as f64, (v * h as f32) as f64),
+    };
+    let (nx, ny) = view.to_crop.apply(px, py);
+    let g = prep.encoded(prep.to_display(p, u, v, nx as f32, ny as f32));
+    let (hue, saturation, _) = rgb_to_hsv(g);
+    [hue, saturation, luma(g).clamp(0.0, 1.0)]
 }
 
 /// Render `out_w × out_h` display-ready sRGB pixels.
@@ -811,10 +1086,16 @@ pub fn render(scene: &Scene, adj: &Adjustments, view: &View, out_w: usize, out_h
         assert_eq!((out_w, out_h), (img.width, img.height), "a view without a mapping renders the image itself");
     }
     let prep = Prepared::new(scene, &adj, view);
+    let warp = Warp::new(&adj.geometry, img.width, img.height);
+    let lens = Lens::new(&adj, scene.look.chromatic, img.width, img.height);
+    let healer = Healer::new(&adj.spots, img);
     let fetch = Fetch {
         img,
         to_source: view.to_source,
-        lens: Lens::new(&adj, scene.look.chromatic, img.width, img.height),
+        plain: warp.is_none() && lens.is_none() && healer.is_none(),
+        warp,
+        lens,
+        healer,
         inv_w: 1.0 / img.width as f32,
         inv_h: 1.0 / img.height as f32,
     };
@@ -1207,6 +1488,189 @@ mod tests {
             let p = preview.rgb[(ey * 200 + ex + 100) * 3] as i32;
             let e = export.rgb[(ey * ow + ex) * 3] as i32;
             assert!((p - e).abs() <= 1, "({ex},{ey}): preview {p} export {e}");
+        }
+    }
+
+    // ---- masks, Point Color, Geometry and healing, through the renderer
+
+    use crate::adjust::{Geometry, LocalAdjust, Mask, MaskShape, PointColor, Spot, SpotMode};
+
+    fn grey_photo(w: usize, h: usize) -> LinearImage {
+        LinearImage::new(w, h, vec![[0.18; 3]; w * h])
+    }
+
+    fn px(r: &RenderedImage, x: usize, y: usize) -> [u8; 3] {
+        let i = (y * r.width + x) * 3;
+        [r.rgb[i], r.rgb[i + 1], r.rgb[i + 2]]
+    }
+
+    #[test]
+    fn a_mask_changes_only_its_own_part_of_the_photo() {
+        let img = grey_photo(200, 100);
+        // Darken the top by a stop, fading out between a quarter and half way down.
+        let sky = Mask {
+            shape: MaskShape::Linear { from: [0.5, 0.25], to: [0.5, 0.5] },
+            invert: false,
+            adjust: LocalAdjust { exposure: -1.0, ..Default::default() },
+        };
+        let adj = Adjustments { masks: vec![sky.clone()], ..Default::default() };
+        let r = render_srgb8(&img, &adj, &Look::neutral());
+        let plain = gray(0.18, &Adjustments::default());
+        assert_eq!(px(&r, 100, 5)[0], gray(0.09, &Adjustments::default()), "full strength at the top");
+        assert_eq!(px(&r, 100, 90)[0], plain, "untouched at the bottom");
+        let middle = px(&r, 100, 37)[0];
+        assert!(middle > px(&r, 100, 5)[0] && middle < plain, "fades in between: {middle}");
+        // Inverted, it is the bottom that changes.
+        let adj = Adjustments { masks: vec![Mask { invert: true, ..sky.clone() }], ..Default::default() };
+        let r = render_srgb8(&img, &adj, &Look::neutral());
+        assert_eq!((px(&r, 100, 5)[0], px(&r, 100, 90)[0]), (plain, gray(0.09, &Adjustments::default())));
+        // A mask with no slider moved changes nothing at all.
+        let idle = Adjustments { masks: vec![Mask { adjust: LocalAdjust::default(), ..sky }], ..Default::default() };
+        assert_eq!(render_srgb8(&img, &idle, &Look::neutral()).rgb, render_srgb8(&img, &Adjustments::default(), &Look::neutral()).rgb);
+    }
+
+    #[test]
+    fn mask_sliders_work_like_the_main_ones_inside_the_mask() {
+        let img = LinearImage::new(1, 1, vec![[0.3, 0.2, 0.1]]);
+        let everywhere = |adjust: LocalAdjust| Adjustments {
+            masks: vec![Mask { shape: MaskShape::Radial { centre: [0.5, 0.5], radius: [3.0, 3.0], angle: 0.0, feather: 0.0 }, invert: false, adjust }],
+            ..Default::default()
+        };
+        let look = Look::neutral();
+        let render1 = |a: &Adjustments| px(&render_srgb8(&img, a, &look), 0, 0);
+        // Exposure and white balance match the global sliders exactly.
+        assert_eq!(render1(&everywhere(LocalAdjust { exposure: 0.7, ..Default::default() })), render1(&Adjustments { exposure: 0.7, ..Default::default() }));
+        let warm = render1(&everywhere(LocalAdjust { temperature: 40.0, ..Default::default() }));
+        assert_eq!(warm, render1(&Adjustments { temperature: 40.0, ..Default::default() }));
+        // The tone sliders too (a single pixel has no surroundings to complicate things).
+        let local = render1(&everywhere(LocalAdjust { contrast: 40.0, highlights: -30.0, shadows: 25.0, ..Default::default() }));
+        let global = render1(&Adjustments { contrast: 40.0, highlights: -30.0, shadows: 25.0, ..Default::default() });
+        assert_eq!(local, global);
+        // Saturation: −100 leaves grey, and more spreads the channels apart.
+        let none = render1(&everywhere(LocalAdjust { saturation: -100.0, ..Default::default() }));
+        assert!(none[0] == none[1] && none[1] == none[2], "{none:?}");
+        let more = render1(&everywhere(LocalAdjust { saturation: 60.0, ..Default::default() }));
+        let base = render1(&Adjustments::default());
+        assert!(more[0] as i32 - more[2] as i32 > base[0] as i32 - base[2] as i32);
+    }
+
+    #[test]
+    fn point_color_changes_the_picked_colour_and_leaves_others_alone() {
+        // Three stripes: orange, blue, grey.
+        let (orange, blue, grey) = ([0.6, 0.25, 0.05], [0.05, 0.15, 0.6], [0.2, 0.2, 0.2]);
+        let img = LinearImage::new(3, 1, vec![orange, blue, grey]);
+        let look = Look::neutral();
+        let base = render_srgb8(&img, &Adjustments::default(), &look);
+        // Pick the orange stripe, as the app would.
+        let [hue, saturation, luminance] = pick_colour(&img, &Adjustments::default(), &look, (3, 1), 0.17, 0.5);
+        assert!((10.0..40.0).contains(&hue) && saturation > 0.5, "picked hue {hue}, saturation {saturation}");
+        let pick = PointColor { hue, saturation, luminance, ..Default::default() };
+        // Desaturate it fully: the orange goes grey, blue and grey stay exactly as they were.
+        let adj = Adjustments { point_colors: vec![PointColor { sat_shift: -100.0, ..pick }], ..Default::default() };
+        let r = render_srgb8(&img, &adj, &look);
+        let o = px(&r, 0, 0);
+        assert!(o[0] == o[1] && o[1] == o[2], "{o:?}");
+        assert_eq!((px(&r, 1, 0), px(&r, 2, 0)), (px(&base, 1, 0), px(&base, 2, 0)));
+        // Shift its hue: orange turns towards yellow-green; the others stay.
+        let adj = Adjustments { point_colors: vec![PointColor { hue_shift: 80.0, ..pick }], ..Default::default() };
+        let r = render_srgb8(&img, &adj, &look);
+        let o = px(&r, 0, 0);
+        assert!(o[1] as i32 > px(&base, 0, 0)[1] as i32 + 20, "more green than before: {o:?}");
+        assert_eq!((px(&r, 1, 0), px(&r, 2, 0)), (px(&base, 1, 0), px(&base, 2, 0)));
+        // Darken it.
+        let adj = Adjustments { point_colors: vec![PointColor { lum_shift: -100.0, ..pick }], ..Default::default() };
+        assert!(px(&render_srgb8(&img, &adj, &look), 0, 0)[0] < px(&base, 0, 0)[0] - 30);
+        // A pick with nothing changed costs nothing and changes nothing.
+        let adj = Adjustments { point_colors: vec![pick], ..Default::default() };
+        assert_eq!(render_srgb8(&img, &adj, &look).rgb, base.rgb);
+    }
+
+    #[test]
+    fn a_grey_pick_is_matched_by_brightness_not_hue() {
+        let img = LinearImage::new(3, 1, vec![[0.2, 0.2, 0.2], [0.02, 0.02, 0.02], [0.6, 0.1, 0.1]]);
+        let look = Look::neutral();
+        let base = render_srgb8(&img, &Adjustments::default(), &look);
+        let [hue, saturation, luminance] = pick_colour(&img, &Adjustments::default(), &look, (3, 1), 0.17, 0.5);
+        assert!(saturation < 0.05);
+        let adj = Adjustments { point_colors: vec![PointColor { hue, saturation, luminance, lum_shift: 100.0, range: 20.0, ..Default::default() }], ..Default::default() };
+        let r = render_srgb8(&img, &adj, &look);
+        assert!(px(&r, 0, 0)[0] > px(&base, 0, 0)[0] + 20, "the mid grey is lifted");
+        assert_eq!(px(&r, 2, 0), px(&base, 2, 0), "the red is not");
+    }
+
+    #[test]
+    fn geometry_moves_the_picture_and_leaves_empty_corners_black() {
+        // Left half dark, right half bright.
+        let (w, h) = (200usize, 100usize);
+        let img = LinearImage::new(w, h, (0..w * h).map(|i| if i % w < w / 2 { [0.05; 3] } else { [0.5; 3] }).collect());
+        let look = Look::neutral();
+        // Slide the picture right by a fifth of its width: the edge between the halves moves 40 px.
+        let adj = Adjustments { geometry: Geometry { x_offset: 40.0, ..Default::default() }, ..Default::default() };
+        let r = render_srgb8(&img, &adj, &look);
+        let (dark, bright) = (gray(0.05, &Adjustments::default()), gray(0.5, &Adjustments::default()));
+        assert_eq!((px(&r, 130, 50)[0], px(&r, 150, 50)[0]), (dark, bright));
+        assert_eq!(px(&r, 10, 50), [0, 0, 0], "nothing to show where the picture moved away from");
+        // Constrain zooms in instead of showing empty space.
+        let adj = Adjustments { geometry: Geometry { rotate: 8.0, vertical: -40.0, constrain: true, ..Default::default() }, ..Default::default() };
+        let bright_everywhere = LinearImage::new(w, h, vec![[0.5; 3]; w * h]);
+        let r = render_srgb8(&bright_everywhere, &adj, &look);
+        assert!(r.rgb.iter().all(|v| *v == bright), "an empty corner shows");
+        // The same warp through the preview path and the export path gives the same picture.
+        let adj = Adjustments { geometry: Geometry { vertical: 30.0, rotate: -5.0, ..Default::default() }, ..Default::default() };
+        let whole = render_srgb8(&img, &adj, &look);
+        let (view, ow, oh) = View::export(&adj.crop, w, h);
+        let exported = render(&Scene { image: &img, look: &look, lut: None }, &adj, &view, ow, oh);
+        assert_eq!(whole.rgb, exported.rgb);
+    }
+
+    #[test]
+    fn a_mask_stays_on_the_same_part_of_the_photo_when_it_is_warped_or_cropped() {
+        let (w, h) = (200usize, 100usize);
+        let img = grey_photo(w, h);
+        let look = Look::neutral();
+        // Darken a disc around a point left of centre.
+        let disc = Mask {
+            shape: MaskShape::Radial { centre: [0.3, 0.5], radius: [0.08, 0.08], angle: 0.0, feather: 0.0 },
+            invert: false,
+            adjust: LocalAdjust { exposure: -2.0, ..Default::default() },
+        };
+        let plain = gray(0.18, &Adjustments::default());
+        // Slide the picture right by 20 % of its width (40 px): the dark disc moves with it.
+        let adj = Adjustments { masks: vec![disc.clone()], geometry: Geometry { x_offset: 40.0, ..Default::default() }, ..Default::default() };
+        let r = render_srgb8(&img, &adj, &look);
+        assert!(px(&r, 100, 50)[0] < plain - 40, "the disc should now be at x = 100");
+        assert_eq!(px(&r, 60, 50)[0], plain, "and no longer at x = 60");
+        // Crop to the right half: the disc is outside the picture and nothing is dark.
+        let mut adj = Adjustments { masks: vec![disc], ..Default::default() };
+        adj.crop = Crop { cx: 0.75, cy: 0.5, w: 0.5, h: 1.0, ..Crop::default() };
+        let (view, ow, oh) = View::export(&adj.crop, w, h);
+        let r = render(&Scene { image: &img, look: &look, lut: None }, &adj, &view, ow, oh);
+        assert!(r.rgb.iter().all(|v| *v == plain));
+    }
+
+    #[test]
+    fn healing_spots_are_applied_when_the_photo_is_rendered() {
+        let (w, h) = (200usize, 100usize);
+        let mut img = grey_photo(w, h);
+        for y in 45..55 {
+            for x in 55..65 {
+                img.pixels[y * w + x] = [0.01; 3];
+            }
+        }
+        let look = Look::neutral();
+        let plain = gray(0.18, &Adjustments::default());
+        assert!(px(&render_srgb8(&img, &Adjustments::default(), &look), 60, 50)[0] < 40);
+        for mode in [SpotMode::Heal, SpotMode::Clone] {
+            let spot = Spot { at: [0.3, 0.5], source: [0.6, 0.5], radius: 0.06, feather: 20.0, opacity: 100.0, mode };
+            let adj = Adjustments { spots: vec![spot], ..Default::default() };
+            let r = render_srgb8(&img, &adj, &look);
+            for (x, y) in [(60, 50), (56, 46), (64, 54), (100, 50), (20, 20)] {
+                assert!((px(&r, x, y)[0] as i32 - plain as i32).abs() <= 1, "{mode:?} at ({x}, {y}): {:?}", px(&r, x, y));
+            }
+            // The sharpening path reads the photo the same way.
+            let sharp = Adjustments { sharpen: crate::adjust::Sharpen { amount: 80.0, ..Default::default() }, ..adj };
+            let r = render_srgb8(&img, &sharp, &look);
+            assert!((px(&r, 60, 50)[0] as i32 - plain as i32).abs() <= 2);
         }
     }
 }

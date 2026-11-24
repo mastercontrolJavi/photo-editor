@@ -224,6 +224,183 @@ impl Default for ProfileUse {
 
 pub const PROFILE_AMOUNT: (f32, f32) = (0.0, 200.0);
 
+
+/// Lightroom's Geometry panel: correct (or add) perspective by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Geometry {
+    /// −100 … +100. Negative widens the top (fixes buildings that lean back).
+    pub vertical: f32,
+    /// −100 … +100. Negative widens the left side.
+    pub horizontal: f32,
+    /// −10 … +10 degrees; positive turns the picture clockwise.
+    pub rotate: f32,
+    /// −100 (wider) … +100 (taller).
+    pub aspect: f32,
+    /// 50 … 150 percent.
+    pub scale: f32,
+    /// −100 … +100: slide the picture right (+) or left (−).
+    pub x_offset: f32,
+    /// −100 … +100: slide the picture up (+) or down (−).
+    pub y_offset: f32,
+    /// Zoom in just enough that no empty corners show.
+    pub constrain: bool,
+}
+
+impl Default for Geometry {
+    fn default() -> Self {
+        Self { vertical: 0.0, horizontal: 0.0, rotate: 0.0, aspect: 0.0, scale: 100.0, x_offset: 0.0, y_offset: 0.0, constrain: false }
+    }
+}
+
+impl Geometry {
+    /// True when the picture is not moved at all.
+    pub fn is_identity(&self) -> bool {
+        Self { constrain: false, ..*self } == Self::default()
+    }
+}
+
+pub const GEOMETRY_ROTATE: (f32, f32) = (-10.0, 10.0);
+pub const GEOMETRY_SCALE: (f32, f32) = (50.0, 150.0);
+
+/// One colour picked from the photo, and how to change it (Lightroom's Point Color).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PointColor {
+    /// The picked colour: hue in degrees, saturation and brightness 0 … 1.
+    pub hue: f32,
+    pub saturation: f32,
+    pub luminance: f32,
+    /// Changes, each −100 … +100.
+    pub hue_shift: f32,
+    pub sat_shift: f32,
+    pub lum_shift: f32,
+    /// 0 … 100: how far from the picked colour the change reaches.
+    pub range: f32,
+}
+
+impl Default for PointColor {
+    fn default() -> Self {
+        Self { hue: 0.0, saturation: 0.5, luminance: 0.5, hue_shift: 0.0, sat_shift: 0.0, lum_shift: 0.0, range: 50.0 }
+    }
+}
+
+impl PointColor {
+    pub fn changes_something(&self) -> bool {
+        self.hue_shift != 0.0 || self.sat_shift != 0.0 || self.lum_shift != 0.0
+    }
+}
+
+/// The most colours Point Color keeps.
+pub const MAX_POINT_COLORS: usize = 8;
+
+/// The sliders a mask applies to its part of the photo.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalAdjust {
+    /// Stops, −4 … +4.
+    pub exposure: f32,
+    pub contrast: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
+    pub temperature: f32,
+    pub tint: f32,
+    pub saturation: f32,
+    pub clarity: f32,
+}
+
+pub const LOCAL_EXPOSURE: (f32, f32) = (-4.0, 4.0);
+
+/// One stroke of the masking brush.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrushStroke {
+    /// Positions in the photo, each 0 … 1 across and down.
+    pub points: Vec<[f32; 2]>,
+    /// Brush radius as a fraction of the photo's longer side.
+    pub size: f32,
+    /// 0 (hard edge) … 100 (soft all the way to the centre).
+    pub feather: f32,
+    /// Rubs the mask out instead of painting it.
+    pub erase: bool,
+}
+
+/// Where a mask applies. Positions are fractions of the photo (0 … 1 across
+/// and down), so a mask stays on the same part of the picture when it is cropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MaskShape {
+    /// Full strength on the `from` side, fading to nothing at `to`.
+    Linear { from: [f32; 2], to: [f32; 2] },
+    /// An ellipse: full strength in the middle, fading towards its edge.
+    /// `radius` is in fractions of the photo's longer side.
+    Radial { centre: [f32; 2], radius: [f32; 2], angle: f32, feather: f32 },
+    Brush { strokes: Vec<BrushStroke> },
+}
+
+impl MaskShape {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            MaskShape::Linear { .. } => "Linear gradient",
+            MaskShape::Radial { .. } => "Radial gradient",
+            MaskShape::Brush { .. } => "Brush",
+        }
+    }
+}
+
+/// A local adjustment: a shape and the sliders applied inside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Mask {
+    pub shape: MaskShape,
+    /// Apply everywhere except the shape.
+    #[serde(default)]
+    pub invert: bool,
+    #[serde(default)]
+    pub adjust: LocalAdjust,
+}
+
+pub const MAX_MASKS: usize = 16;
+/// The most points one brush mask keeps (a very long scribble is cut short).
+pub const MAX_BRUSH_POINTS: usize = 20_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpotMode {
+    /// Copy texture from the source and blend its brightness and colour into the surroundings.
+    #[default]
+    Heal,
+    /// Copy the source exactly.
+    Clone,
+}
+
+/// One healing spot: a circle that is covered with another part of the photo.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Spot {
+    /// Centre of the spot in the photo, 0 … 1 across and down.
+    pub at: [f32; 2],
+    /// Centre of the part copied from.
+    pub source: [f32; 2],
+    /// Radius as a fraction of the photo's longer side.
+    pub radius: f32,
+    /// 0 … 100.
+    pub feather: f32,
+    /// 0 … 100.
+    pub opacity: f32,
+    pub mode: SpotMode,
+}
+
+impl Default for Spot {
+    fn default() -> Self {
+        Self { at: [0.5, 0.5], source: [0.6, 0.5], radius: 0.01, feather: 40.0, opacity: 100.0, mode: SpotMode::Heal }
+    }
+}
+
+pub const SPOT_RADIUS: (f32, f32) = (0.002, 0.12);
+pub const MAX_SPOTS: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Adjustments {
@@ -250,6 +427,7 @@ pub struct Adjustments {
     /// Brightness of each colour band in black & white (−100 … +100).
     pub bw_mix: [f32; 8],
     pub grading: ColorGrading,
+    pub point_colors: Vec<PointColor>,
     pub calibration: Calibration,
     // ---- Effects
     pub texture: f32,
@@ -264,7 +442,11 @@ pub struct Adjustments {
     pub optics: Optics,
     // ---- Look
     pub lut: Option<LutUse>,
+    // ---- Local work
+    pub masks: Vec<Mask>,
+    pub spots: Vec<Spot>,
     // ---- Geometry
+    pub geometry: Geometry,
     pub crop: Crop,
 }
 
@@ -372,6 +554,77 @@ impl Adjustments {
                 self.lut = None;
             }
         }
+        self.point_colors.truncate(MAX_POINT_COLORS);
+        for p in &mut self.point_colors {
+            *p = PointColor {
+                hue: if p.hue.is_finite() { p.hue.rem_euclid(360.0) } else { 0.0 },
+                saturation: fix(p.saturation, (0.0, 1.0), 0.5),
+                luminance: fix(p.luminance, (0.0, 1.0), 0.5),
+                hue_shift: pct(p.hue_shift),
+                sat_shift: pct(p.sat_shift),
+                lum_shift: pct(p.lum_shift),
+                range: fix(p.range, AMOUNT, 50.0),
+            };
+        }
+        let unit = |p: [f32; 2]| [fix(p[0], (-1.0, 2.0), 0.5), fix(p[1], (-1.0, 2.0), 0.5)];
+        self.masks.truncate(MAX_MASKS);
+        for m in &mut self.masks {
+            let l = &mut m.adjust;
+            *l = LocalAdjust {
+                exposure: fix(l.exposure, LOCAL_EXPOSURE, 0.0),
+                contrast: pct(l.contrast),
+                highlights: pct(l.highlights),
+                shadows: pct(l.shadows),
+                whites: pct(l.whites),
+                blacks: pct(l.blacks),
+                temperature: pct(l.temperature),
+                tint: pct(l.tint),
+                saturation: pct(l.saturation),
+                clarity: pct(l.clarity),
+            };
+            match &mut m.shape {
+                MaskShape::Linear { from, to } => {
+                    *from = unit(*from);
+                    *to = unit(*to);
+                }
+                MaskShape::Radial { centre, radius, angle, feather } => {
+                    *centre = unit(*centre);
+                    *radius = [fix(radius[0], (0.002, 3.0), 0.2), fix(radius[1], (0.002, 3.0), 0.2)];
+                    *angle = fix(*angle, (-360.0, 360.0), 0.0);
+                    *feather = fix(*feather, AMOUNT, 50.0);
+                }
+                MaskShape::Brush { strokes } => {
+                    let mut left = MAX_BRUSH_POINTS;
+                    for s in strokes.iter_mut() {
+                        s.points.retain(|p| p[0].is_finite() && p[1].is_finite());
+                        s.points.truncate(left);
+                        left -= s.points.len();
+                        s.size = fix(s.size, (0.001, 0.5), 0.03);
+                        s.feather = fix(s.feather, AMOUNT, 50.0);
+                    }
+                    strokes.retain(|s| !s.points.is_empty());
+                }
+            }
+        }
+        self.spots.truncate(MAX_SPOTS);
+        for s in &mut self.spots {
+            s.at = unit(s.at);
+            s.source = unit(s.source);
+            s.radius = fix(s.radius, SPOT_RADIUS, 0.01);
+            s.feather = fix(s.feather, AMOUNT, 40.0);
+            s.opacity = fix(s.opacity, AMOUNT, 100.0);
+        }
+        let geo = &mut self.geometry;
+        *geo = Geometry {
+            vertical: pct(geo.vertical),
+            horizontal: pct(geo.horizontal),
+            rotate: fix(geo.rotate, GEOMETRY_ROTATE, 0.0),
+            aspect: pct(geo.aspect),
+            scale: fix(geo.scale, GEOMETRY_SCALE, 100.0),
+            x_offset: pct(geo.x_offset),
+            y_offset: pct(geo.y_offset),
+            constrain: geo.constrain,
+        };
         self.crop = self.crop.sanitized();
         self
     }
@@ -380,10 +633,20 @@ impl Adjustments {
         *self == Self::default()
     }
 
-    /// The same edit with the crop of `other` (used by presets and "Reset",
-    /// which change the look but leave the framing alone).
+    /// The same edit with the framing of `other`: its crop and its Geometry
+    /// (used by presets, "Reset" and the Before view, which change the look
+    /// but leave the framing alone).
     pub fn with_crop_of(mut self, other: &Adjustments) -> Self {
         self.crop = other.crop;
+        self.geometry = other.geometry;
+        self
+    }
+
+    /// The same edit with the masks and healing spots of `other`. These belong
+    /// to one photo, so applying a preset keeps them.
+    pub fn with_local_work_of(mut self, other: &Adjustments) -> Self {
+        self.masks = other.masks.clone();
+        self.spots = other.spots.clone();
         self
     }
 }

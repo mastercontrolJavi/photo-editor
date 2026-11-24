@@ -1,11 +1,13 @@
 //! The picture area: the photo itself, and the crop overlay with its handles.
 
-use eframe::egui::{self, Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, TextureId, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, CursorIcon, Key, PointerButton, Pos2, Rect, Response, Sense, Stroke, TextureId, Vec2};
+use pipeline::adjust::{PointColor, MAX_POINT_COLORS};
 use pipeline::Crop;
 
-use crate::app::{file_name, EditorApp, Tab};
+use crate::app::{file_name, EditorApp, Tab, TEX_OPTIONS};
 use crate::engine::{Region, PREVIEW_EDGES};
 use crate::theme;
+use crate::tools::{heal_tool, mask_tool, PhotoMap};
 
 /// A crop edit in progress.
 pub(crate) struct CropDrag {
@@ -93,9 +95,9 @@ impl EditorApp {
     fn photo_canvas(&mut self, ui: &mut egui::Ui, area: Rect) -> (f32, Option<Region>) {
         let ppp = ui.ctx().pixels_per_point();
         let doc = self.doc.as_ref().expect("checked by the caller");
-        let (sw, sh) = doc.full_size();
-        let (sw, sh) = (sw as f64, sh as f64);
-        let crop = &doc.adjustments.crop;
+        let full = doc.full_size();
+        let (sw, sh) = (full.0 as f64, full.1 as f64);
+        let crop = doc.adjustments.crop;
         let (ow, oh) = crop.output_size_f(sw, sh);
         let (ow, oh) = (ow as f32, oh as f32);
         let inner = area.shrink(20.0);
@@ -120,26 +122,53 @@ impl EditorApp {
             *centre = (under.0 - d.x / ow, under.1 - d.y / oh);
         };
 
+        // A tool that works on the photo takes the mouse; holding Space gives it back for moving around.
+        let tool_active = !self.show_before && (self.picking_colour || matches!(self.tab, Tab::Mask | Tab::Heal));
+        let space = ui.input(|i| i.key_down(Key::Space)) && !ui.ctx().egui_wants_keyboard_input();
         let resp = ui.interact(area, ui.scope_id().with("photo"), Sense::click_and_drag());
         if let Some(pos) = resp.hover_pos() {
-            let wheel = ui.input(|i| i.smooth_scroll_delta.y);
-            if wheel != 0.0 {
-                let new = scale * (wheel * 0.004).exp();
+            // A trackpad scrolls in screen points and a mouse wheel in lines: that is how the two are told apart.
+            let (pinch, scroll, trackpad) = ui.input(|i| {
+                let mut trackpad = None;
+                for event in &i.events {
+                    if let egui::Event::MouseWheel { unit, source, .. } = event {
+                        let fingers = matches!(source, egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum);
+                        trackpad = Some(fingers || *unit == egui::MouseWheelUnit::Point);
+                    }
+                }
+                (i.zoom_delta(), i.smooth_scroll_delta, trackpad)
+            });
+            if let Some(trackpad) = trackpad {
+                self.zoom.trackpad = trackpad;
+            }
+            // Pinching (or Ctrl + scrolling) zooms.
+            if pinch != 1.0 {
+                let new = scale * pinch;
                 zoom_at(&mut scale, &mut centre, pos, new);
             }
+            if scroll != Vec2::ZERO {
+                if self.zoom.trackpad {
+                    // Two fingers on a trackpad slide the picture around.
+                    centre = (centre.0 - scroll.x / (scale * ow), centre.1 - scroll.y / (scale * oh));
+                } else {
+                    let new = scale * (scroll.y * 0.004).exp();
+                    zoom_at(&mut scale, &mut centre, pos, new);
+                }
+            }
         }
-        if resp.double_clicked() {
+        if resp.double_clicked() && !tool_active {
             let pos = resp.interact_pointer_pos().unwrap_or(inner.center());
             let new = if scale > fit * 1.01 { fit } else { 1.0 / ppp };
             zoom_at(&mut scale, &mut centre, pos, new);
         }
         let zoomed = scale > fit * 1.001;
+        let hand = !tool_active || space;
         if zoomed {
-            if resp.dragged() {
+            if (hand && resp.dragged_by(PointerButton::Primary)) || resp.dragged_by(PointerButton::Middle) {
                 let d = resp.drag_delta() / scale;
                 centre = (centre.0 - d.x / ow, centre.1 - d.y / oh);
                 ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-            } else if resp.hovered() {
+            } else if hand && resp.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::Grab);
             }
         }
@@ -149,13 +178,19 @@ impl EditorApp {
         centre.1 = if half.1 >= 0.5 { 0.5 } else { centre.1.clamp(half.1, 1.0 - half.1) };
         self.zoom.scale = zoomed.then_some(scale * ppp);
         self.zoom.centre = centre;
+        self.zoom.fit = fit * ppp;
+        self.zoom.most = most * ppp;
 
         let rect = Rect::from_min_max(place(scale, centre, 0.0, 0.0), place(scale, centre, 1.0, 1.0));
         let painter = ui.painter_at(area);
+        let overlay = self.mask_overlay_texture(ui.ctx());
         let doc = self.doc.as_ref().expect("checked by the caller");
-        let tex = if self.show_before { &doc.before_tex } else { &doc.after_tex };
+        // The stored Before picture has no Geometry in it; with a warp the Before view is rendered like any other.
+        let stored_before = self.show_before && doc.adjustments.geometry.is_identity();
+        let tex = if stored_before { &doc.before_tex } else { &doc.after_tex };
         let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
-        draw_quad(&painter, tex.id(), corners, doc.adjustments.crop.corners_uv(sw, sh));
+        let uvs = doc.adjustments.crop.corners_uv(sw, sh);
+        draw_quad(&painter, tex.id(), corners, uvs);
 
         // Zoomed in past what the largest preview can show sharply: ask for the
         // visible part from the full-size photo, and draw the last one received on top.
@@ -182,18 +217,76 @@ impl EditorApp {
                 painter.image(sharp.id(), at, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
             }
         }
+        if let Some(overlay) = overlay {
+            // Where the selected mask applies, in red.
+            draw_quad(&painter.with_clip_rect(rect.intersect(area)), overlay, corners, uvs);
+        }
         if self.show_before {
             let badge = Rect::from_min_size(rect.min.max(area.min) + Vec2::new(10.0, 10.0), Vec2::new(66.0, 22.0));
             painter.rect_filled(badge, CornerRadius::same(4), Color32::from_black_alpha(170));
             painter.text(badge.center(), egui::Align2::CENTER_CENTER, "BEFORE", egui::FontId::proportional(12.0), Color32::WHITE);
         }
-        if zoomed {
-            let label = format!("{:.0}%", scale * ppp * 100.0);
-            let badge = Rect::from_min_size(Pos2::new(area.max.x - 66.0, area.min.y + 10.0), Vec2::new(56.0, 22.0));
-            painter.rect_filled(badge, CornerRadius::same(4), Color32::from_black_alpha(170));
-            painter.text(badge.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), Color32::WHITE);
+        if tool_active && !space {
+            let map = PhotoMap::new(inner.center(), scale, centre, &doc.adjustments, full);
+            self.photo_tools(ui, &resp, &painter.with_clip_rect(area), &map);
         }
         (whole_long_edge, region)
+    }
+
+    /// The red picture of where the selected mask applies, remade when the mask changes.
+    fn mask_overlay_texture(&mut self, ctx: &egui::Context) -> Option<TextureId> {
+        if self.tab != Tab::Mask || !self.mask_ui.show_overlay || self.show_before {
+            return None;
+        }
+        let doc = self.doc.as_ref()?;
+        let mask = doc.adjustments.masks.get(self.mask_ui.selected?)?;
+        let key = (mask.shape.clone(), mask.invert, doc.adjustments.geometry);
+        if self.mask_overlay.as_ref().map(|(k, _)| k) != Some(&key) {
+            let (w, h, strength) = pipeline::mask::overlay(mask, &doc.adjustments.geometry, doc.full_size(), 384);
+            let mut rgba = Vec::with_capacity(strength.len() * 4);
+            for s in strength {
+                rgba.extend_from_slice(&[235, 45, 45, (s as u16 * 96 / 255) as u8]);
+            }
+            let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+            let texture = ctx.load_texture("mask-overlay", image, TEX_OPTIONS);
+            self.mask_overlay = Some((key, texture));
+        }
+        self.mask_overlay.as_ref().map(|(_, t)| t.id())
+    }
+
+    /// Whatever tool is working on the photo: the colour picker, a mask, or healing.
+    fn photo_tools(&mut self, ui: &egui::Ui, resp: &Response, painter: &egui::Painter, map: &PhotoMap) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        let mut changed = false;
+        if self.picking_colour {
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            }
+            if let (true, Some(pos)) = (resp.clicked_by(PointerButton::Primary), resp.interact_pointer_pos()) {
+                let p = map.to_photo(pos);
+                let inside = (0.0..=1.0).contains(&p[0]) && (0.0..=1.0).contains(&p[1]);
+                if inside && doc.adjustments.point_colors.len() < MAX_POINT_COLORS {
+                    let look = doc.decoded.info.look();
+                    let [hue, saturation, luminance] =
+                        pipeline::render::pick_colour(&doc.previews[0], &doc.adjustments, &look, doc.full_size(), p[0], p[1]);
+                    doc.adjustments.point_colors.push(PointColor { hue, saturation, luminance, ..PointColor::default() });
+                    self.point_selected = doc.adjustments.point_colors.len() - 1;
+                    self.picking_colour = false;
+                    changed = true;
+                }
+            }
+        } else if self.tab == Tab::Mask {
+            changed = mask_tool(ui, resp, painter, map, &mut doc.adjustments.masks, &mut self.mask_ui);
+        } else if self.tab == Tab::Heal {
+            // The source is chosen on the largest preview: quick, and plenty for judging surroundings.
+            let preview = doc.previews[0].clone();
+            changed = heal_tool(ui, resp, painter, map, &mut doc.adjustments.spots, &mut self.heal_ui, |at, radius| {
+                pipeline::heal::suggest_source(&preview, at, radius)
+            });
+        }
+        if changed {
+            self.adjustments_changed();
+        }
     }
 
     /// Crop mode: the whole photo with the crop rectangle on top.

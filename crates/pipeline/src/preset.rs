@@ -71,6 +71,10 @@ pub(crate) fn merge(base: &mut Value, patch: &Value) {
     }
 }
 
+/// Parts of an edit that belong to one photo and so are never part of a
+/// preset: the framing, and work done on particular places in the picture.
+const PER_PHOTO: [&str; 4] = ["crop", "geometry", "masks", "spots"];
+
 impl Preset {
     /// The edit you get by applying this preset to `current`. The crop is never changed.
     pub fn apply(&self, current: &Adjustments) -> Adjustments {
@@ -85,11 +89,13 @@ impl Preset {
         let mut value = serde_json::to_value(&start).expect("adjustments always serialise");
         let mut settings = self.settings.clone();
         if let Some(obj) = settings.as_object_mut() {
-            obj.remove("crop");
+            for key in PER_PHOTO {
+                obj.remove(key);
+            }
         }
         merge(&mut value, &settings);
         match serde_json::from_value::<Adjustments>(value) {
-            Ok(a) => a.sanitized().with_crop_of(current),
+            Ok(a) => a.sanitized().with_crop_of(current).with_local_work_of(current),
             Err(_) => current.clone(),
         }
     }
@@ -98,7 +104,9 @@ impl Preset {
     pub fn from_adjustments(name: &str, group: &str, adj: &Adjustments) -> Self {
         let mut settings = serde_json::to_value(adj.clone().sanitized()).expect("adjustments always serialise");
         if let Some(obj) = settings.as_object_mut() {
-            obj.remove("crop");
+            for key in PER_PHOTO {
+                obj.remove(key);
+            }
         }
         Preset { schema: schema(), name: name.into(), group: group.into(), settings, replace: true, unsupported: vec![], file: None }
     }
@@ -786,6 +794,34 @@ mod tests {
         assert_eq!(a.exposure, 0.35);
         assert_eq!(a.mixer[0].saturation, 40.0, "bands the preset doesn't mention stay");
         assert_eq!(a.crop, current.crop);
+    }
+
+    #[test]
+    fn presets_leave_masks_healing_and_geometry_alone_and_never_carry_them() {
+        use crate::adjust::{Geometry, LocalAdjust, Mask, MaskShape, PointColor, Spot};
+        let mut current = Adjustments { exposure: 0.3, ..Default::default() };
+        current.masks.push(Mask {
+            shape: MaskShape::Linear { from: [0.5, 0.1], to: [0.5, 0.4] },
+            invert: false,
+            adjust: LocalAdjust { exposure: -0.5, ..Default::default() },
+        });
+        current.spots.push(Spot::default());
+        current.geometry = Geometry { vertical: -20.0, ..Default::default() };
+        current.point_colors.push(PointColor { hue: 200.0, sat_shift: 30.0, ..Default::default() });
+        // A whole-look preset replaces the look but not the work done on this photo.
+        let saved = Preset::from_adjustments("Mine", "User", &current);
+        let settings = saved.settings.as_object().unwrap();
+        for key in ["crop", "geometry", "masks", "spots"] {
+            assert!(!settings.contains_key(key), "{key} must not be saved in a preset");
+        }
+        assert!(settings.contains_key("point_colors"), "a picked colour is part of the look");
+        let other = builtin().into_iter().find(|p| p.replace).expect("a whole-look starter preset");
+        let after = other.apply(&current);
+        assert_eq!((&after.masks, &after.spots, after.geometry), (&current.masks, &current.spots, current.geometry));
+        // And applying the saved preset to another photo brings none of them along.
+        let fresh = saved.apply(&Adjustments::default());
+        assert!(fresh.masks.is_empty() && fresh.spots.is_empty() && fresh.geometry == Geometry::default());
+        assert_eq!((fresh.exposure, fresh.point_colors.len()), (0.3, 1));
     }
 
     #[test]

@@ -137,6 +137,24 @@ mod tests {
     }
 
     #[test]
+    fn masks_spots_point_colours_and_geometry_round_trip() {
+        use crate::adjust::{BrushStroke, Geometry, LocalAdjust, Mask, MaskShape, PointColor, Spot, SpotMode};
+        let dir = tempfile::tempdir().unwrap();
+        let src = photo(dir.path());
+        let geometry = Geometry { vertical: -32.0, rotate: 1.5, scale: 104.0, constrain: true, ..Default::default() };
+        let mut adj = Adjustments { geometry, ..Default::default() };
+        adj.point_colors.push(PointColor { hue: 211.0, saturation: 0.6, luminance: 0.4, hue_shift: -12.0, sat_shift: 25.0, lum_shift: 5.0, range: 35.0 });
+        adj.spots.push(Spot { at: [0.2, 0.3], source: [0.25, 0.33], radius: 0.012, feather: 55.0, opacity: 90.0, mode: SpotMode::Clone });
+        let local = LocalAdjust { exposure: -0.8, highlights: -40.0, temperature: 12.0, ..Default::default() };
+        adj.masks.push(Mask { shape: MaskShape::Linear { from: [0.5, 0.1], to: [0.5, 0.45] }, invert: false, adjust: local });
+        adj.masks.push(Mask { shape: MaskShape::Radial { centre: [0.4, 0.6], radius: [0.2, 0.1], angle: 15.0, feather: 70.0 }, invert: true, adjust: local });
+        let stroke = BrushStroke { points: vec![[0.1, 0.1], [0.2, 0.15], [0.3, 0.1]], size: 0.03, feather: 60.0, erase: false };
+        adj.masks.push(Mask { shape: MaskShape::Brush { strokes: vec![stroke] }, invert: false, adjust: local });
+        save(&src, &adj).unwrap();
+        assert_eq!(load(&src).unwrap(), Some(adj));
+    }
+
+    #[test]
     fn interrupted_save_keeps_previous_edit() {
         let dir = tempfile::tempdir().unwrap();
         let src = photo(dir.path());

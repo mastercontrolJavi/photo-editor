@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "photo-editor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "pipeline",
@@ -2956,7 +2956,7 @@ checksum = "c938015719552d665fd0553b90d96cd7ff58e83e4c061ca99e6bb78865a72752"
 
 [[package]]
 name = "pipeline"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "image",
  "rawler",

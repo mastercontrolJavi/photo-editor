@@ -219,6 +219,23 @@ fn everything_at_once() -> Adjustments {
     a
 }
 
+/// Masks of each kind, a picked colour, a healing spot and a perspective warp.
+fn local_work() -> Adjustments {
+    use pipeline::adjust::{BrushStroke, Geometry, LocalAdjust, Mask, MaskShape, PointColor, Spot, SpotMode};
+    let mut a = Adjustments { exposure: 0.2, ..Default::default() };
+    let darker = LocalAdjust { exposure: -1.0, highlights: -30.0, saturation: 20.0, ..Default::default() };
+    let warmer = LocalAdjust { exposure: 0.6, temperature: 30.0, shadows: 25.0, ..Default::default() };
+    a.masks.push(Mask { shape: MaskShape::Linear { from: [0.5, 0.1], to: [0.45, 0.5] }, invert: false, adjust: darker });
+    a.masks.push(Mask { shape: MaskShape::Radial { centre: [0.6, 0.55], radius: [0.25, 0.15], angle: 20.0, feather: 60.0 }, invert: true, adjust: warmer });
+    let stroke = BrushStroke { points: vec![[0.1, 0.8], [0.4, 0.7], [0.7, 0.85]], size: 0.06, feather: 70.0, erase: false };
+    a.masks.push(Mask { shape: MaskShape::Brush { strokes: vec![stroke] }, invert: false, adjust: warmer });
+    a.point_colors.push(PointColor { hue: 30.0, saturation: 0.6, luminance: 0.4, hue_shift: 40.0, sat_shift: -30.0, lum_shift: 20.0, range: 60.0 });
+    a.spots.push(Spot { at: [0.3, 0.4], source: [0.45, 0.42], radius: 0.05, feather: 50.0, opacity: 100.0, mode: SpotMode::Heal });
+    a.spots.push(Spot { at: [0.7, 0.3], source: [0.8, 0.35], radius: 0.03, feather: 30.0, opacity: 80.0, mode: SpotMode::Clone });
+    a.geometry = Geometry { vertical: -20.0, horizontal: 10.0, rotate: 2.0, constrain: true, ..Default::default() };
+    a
+}
+
 #[test]
 fn preview_agrees_with_export_scaled_to_preview_size() {
     // Documented tolerance (8-bit sRGB levels, 0–255), measured over all
@@ -234,6 +251,7 @@ fn preview_agrees_with_export_scaled_to_preview_size() {
         Adjustments { exposure: 1.2, temperature: 35.0, tint: 15.0, ..Default::default() },
         Adjustments { exposure: -0.8, temperature: -60.0, tint: -25.0, ..Default::default() },
         everything_at_once(),
+        local_work(),
     ] {
         let preview_src = d.image.downscale_to_fit(400);
         let preview = render_preview(&preview_src, &adj, &d.info.look(), None, (d.image.width, d.image.height));
@@ -250,7 +268,7 @@ fn preview_agrees_with_export_scaled_to_preview_size() {
         let mean = diffs.iter().sum::<f64>() / diffs.len() as f64;
         let p99 = diffs[diffs.len() * 99 / 100];
         let max = *diffs.last().unwrap();
-        println!("preview vs export {adj:?}: mean {mean:.3}, p99 {p99:.2}, max {max:.2} levels");
+        println!("preview vs export (exposure {}, {} masks): mean {mean:.3}, p99 {p99:.2}, max {max:.2} levels", adj.exposure, adj.masks.len());
         assert!(mean <= MEAN_TOL && p99 <= P99_TOL, "mean {mean:.3} p99 {p99:.2}");
     }
 }

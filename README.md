@@ -3,7 +3,7 @@
 An offline photo editor for Mac and Windows, written in Rust. It was built for iPhone ProRAW and also opens JPEG, PNG and HEIC.
 It needs no account, network connection or paid service.
 
-You open a photo, edit it with Lightroom-style controls, crop it, and export a full-size sRGB JPEG. Edits are saved beside the photo and never change it.
+You open a photo, edit it with Lightroom-style controls, crop it, retouch it, and export a full-size sRGB JPEG. Edits are saved beside the photo and never change it.
 
 ## Download and install
 
@@ -68,10 +68,13 @@ The Profile menu sets the photo's starting look, underneath the sliders, with an
 | Open a photo | **Open…** (Ctrl+O), drop a file on the window, or `photo-editor.exe IMG_0001.DNG`. RAW, JPEG, PNG and HEIC all open the same way. |
 | Edit | The **Edit** tab. Double-click any slider to reset it. |
 | Crop | The **Crop** tab: drag the corners or edges, pick a shape, straighten, rotate, flip. Press Enter when done. |
+| Remove a blemish | The **Heal** tab: click the blemish. See [Healing](#healing). |
+| Change part of the photo | The **Mask** tab: a linear gradient, a radial gradient or a brush, each with its own sliders. See [Masks](#masks). |
 | Presets | The **Presets** tab: click one to apply it. |
-| Zoom | **100%** / **Fit** at the top, press `Z`, double-click the photo, or use the mouse wheel. Drag to move around when zoomed in. |
+| Zoom | The strip under the photo: **Fit**, **100%**, **−** / **+** and a slider. Or pinch on a trackpad, turn the mouse wheel, press `Z`, or double-click the photo. |
+| Move around when zoomed in | Drag the photo, or slide two fingers on a trackpad. In the Heal and Mask tabs the mouse belongs to the tool, so hold **Space** and drag (or use the middle mouse button). |
 | Undo / redo | Ctrl+Z / Ctrl+Y, or the buttons at the top |
-| Compare | **Before / After** buttons, or press `\` |
+| Compare | **Before / After** at the bottom right of the photo, or press `\` |
 | Save the edit | **Save edit** (Ctrl+S). It writes `IMG_0001.DNG.edit.json` next to the photo. |
 | Export | **Export JPEG** (Ctrl+E). It writes `Exported\IMG_0001.jpg` next to the photo. Export also saves the edit. |
 
@@ -83,10 +86,11 @@ On a Mac, use **Cmd** wherever this page says Ctrl.
 |---|---|
 | Top row | Auto (sets the Light sliders from the photo's brightness), B&W, Reset all, Profile and its Amount |
 | Light | Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Curve (point curves for RGB, Red, Green, Blue, plus the four parametric sliders) |
-| Color | Temp, Tint, Vibrance, Saturation, B&W, Color Mixer (hue / saturation / luminance for 8 colours), B&W Mixer, Color Grading (shadows, midtones, highlights, global, blending, balance) |
+| Color | Temp, Tint, Vibrance, Saturation, B&W, Color Mixer (hue / saturation / luminance for 8 colours), B&W Mixer, Point Color (pick up to 8 exact colours from the photo and shift each one's hue, saturation and luminance), Color Grading (shadows, midtones, highlights, global, blending, balance) |
 | Effects | Texture, Clarity, Dehaze, Vignette (midpoint, feather, roundness), Grain (size, roughness) |
 | Detail | Sharpening (radius, detail, masking), Noise Reduction (luminance, colour) |
 | Optics | Remove chromatic aberration, Distortion, Lens vignetting, Defringe (purple, green) |
+| Geometry | Vertical, Horizontal, Rotate, Aspect, Scale, X offset, Y offset, Constrain crop |
 | Look | A `.cube` LUT with an Amount slider, once one is applied from Presets |
 
 The slider names and ranges follow Lightroom's, but the maths behind them is this app's own. The same number gives a similar result, not an identical one.
@@ -96,8 +100,34 @@ The slider names and ranges follow Lightroom's, but the maths behind them is thi
 * **Lens corrections:** iPhone ProRAW files are already corrected by the phone, so there is nothing to switch on. The Optics sliders are for touch-ups. "Remove chromatic aberration" measures the colour misalignment in each photo and does nothing if there is none.
 * **Auto** is a simple rule based on the photo's brightness. It is not Lightroom's Auto, which uses a trained model.
 * **Calibration** (the camera's colour primaries) has no sliders, but imported presets that use it are applied.
+* **Highlights and Whites** squeeze or stretch the bright end of the photo: the brighter a tone, the further it moves. Highlights starts just under middle grey; Whites starts at middle grey and mostly moves the very brightest tones. However far they are pushed, a brighter tone never comes out darker than a dimmer one.
+* **Point Color:** click **Pick a colour from the photo**, then click the colour. **Range** sets how far from that exact colour the change reaches.
+* **Geometry** is set by hand. A negative **Vertical** straightens buildings that lean back. **Constrain crop** zooms in just enough to hide the empty corners. There is no automatic Upright.
 
-**Not in this version yet:** Geometry (perspective), Point Color, masking and healing.
+### Healing
+
+The **Heal** tab covers a round spot with another part of the photo.
+
+1. Set the **Size**, then click the blemish. Zoom in first for small ones.
+2. The app picks a clean patch nearby and shows it as a dashed circle. Drag that circle to use a different patch. Drag the spot to move it.
+3. **Heal** copies the patch's texture and blends its brightness and colour into the surroundings. **Clone** copies the patch exactly.
+4. **Delete** removes the selected spot.
+
+Spots are circles. Painting over a long shape (a wire, a crack) is not in this version: use a row of spots.
+
+### Masks
+
+The **Mask** tab changes only part of the photo. Each mask has its own Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Temp, Tint, Saturation and Clarity.
+
+| Mask | How to place it | Typical use |
+|---|---|---|
+| Linear | Click **Linear**, then drag on the photo from where the change should be full to where it should have faded out | Darken a sky |
+| Radial | Click **Radial**, then drag from the middle of the oval outwards | Brighten a face; with **Invert**, darken everything around it |
+| Brush | Click **Brush**, then paint. **Erase** rubs paint out. | Anything with an irregular shape |
+
+The selected mask is shown in red (untick **Show mask in red** to judge the result). Drag the white dots to move or reshape a gradient. Masks stay on the same part of the photo when you crop or use Geometry. A photo can have up to 16.
+
+**Not in this version yet:** masks that find a subject, a sky or a colour range by themselves; healing along a painted line; automatic Upright.
 **Not planned as-is:** Lightroom's AI features (Denoise, Lens Blur, Adaptive presets) need trained models that this app doesn't have.
 
 ### Presets and LUTs
@@ -106,7 +136,7 @@ The slider names and ranges follow Lightroom's, but the maths behind them is thi
 * **Import presets…** reads Lightroom presets (`.xmp`, and the older `.lrtemplate`) and `.cube` LUTs. You can pick several files at once.
 * An imported preset applies every setting this app has. Anything it can't apply is listed when you import, and the preset is marked with `*`.
   The most common gap is a colour profile or look table embedded in the preset. Presets built mainly on one will look different from Lightroom.
-* Presets never change the crop. A Lightroom preset's white balance in Kelvin is skipped, so the photo keeps its as-shot balance.
+* Presets never change the crop, the Geometry, the masks or the healing spots: those belong to one photo. A Lightroom preset's white balance in Kelvin is skipped, so the photo keeps its as-shot balance.
 * **Save the current edit** stores your own preset under "Yours".
 * Imported and saved presets live in `%APPDATA%\Photo Editor\presets` on Windows and `~/Library/Application Support/Photo Editor/presets` on a Mac (the Info tab has a button to open it).
 
@@ -181,6 +211,9 @@ Inside `crates/pipeline/src`:
 | `rendered.rs`, `wic.rs` | Opening JPEG, PNG and HEIC (HEIC through Windows' own decoder) |
 | `profile.rs` | The Profile menu's looks |
 | `geometry.rs` | Crop, straighten, rotate, flip |
+| `perspective.rs` | The Geometry sliders (a perspective warp) |
+| `mask.rs` | Linear, radial and brush masks: how strongly each applies at any point |
+| `heal.rs` | Healing spots, and choosing a clean patch to heal from |
 | `preset.rs` | Starter presets, Lightroom preset import, the presets folder |
 | `lut.rs` | `.cube` look-up tables |
 | `look.rs` | The camera's own gain map and tone curve from the DNG |
